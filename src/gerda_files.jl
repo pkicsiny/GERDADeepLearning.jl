@@ -2,10 +2,10 @@
 
 
 export FileKey
-immutable FileKey
+immutable FileKey #datafile name
   run::Integer
   event_type::Symbol # :cal, :phy
-  fileid::AbstractString
+  fileid::AbstractString 
   id::AbstractString
 
   function FileKey(id::AbstractString)
@@ -26,24 +26,24 @@ end
 
 export KeyList
 immutable KeyList
-  name::String
-  entries::Vector{FileKey}
+  name::String #.txt name
+  entries::Vector{FileKey} #datafiles
 end
 
-export path
+export path #returns path of actual root datafile
 function path(base_dir::AbstractString, key::FileKey, tier)
   subfolder = (tier == :tier1 || tier == :tier2 || tier == :tierW) ? "ged" : "all"
   str_tier = string(tier)
-  str_run = "run"*lpad(key.run, 4, 0)
+  str_run = "run"*lpad(key.run, 4, 0) # pad e.g. 89 to 0089
   str_event_type = string(key.event_type)
   filename = "gerda-$str_run-$(key.fileid)-$str_event_type-$subfolder-$str_tier.root"
   return joinpath(base_dir, str_tier, subfolder, str_event_type, str_run, filename)
 end
 
-export parse_keylist
-function parse_keylist(keylist_file::AbstractString, name::String)
-  entries = [FileKey(id) for id in open(readlines, keylist_file)]
-  return KeyList(name, entries)
+export parse_keylist #parses whats in the txt
+function parse_keylist(keylist_file::AbstractString, name::String) #path to file and filename
+  entries = [FileKey(id) for id in open(readlines, keylist_file)] # gets actual data file names
+  return KeyList(name, entries) # a .txt file with its entries
 end
 
 export name

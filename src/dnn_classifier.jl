@@ -39,24 +39,34 @@ function dnn_classifier(env::DLEnv, data;
   n = network(env, id)
 
   if action != :load
+
     training_data = flatten(data[:set=>train_key])
+
     xval_data = flatten(data[:set=>xval_key])
 
     # Preprocessing
     if !haskey(training_data, label_key)
       info(env, 2, "$id: No labels found on training data -> Using default energy labels from label_energy_peaks()")
-      label_energy_peaks(training_data, label_key)
-      label_energy_peaks(xval_data, label_key)
+      #label_key=:SSE
+#full of -1 when no counts at label energies
+      label_energy_peaks!(training_data, label_key)
+      label_energy_peaks!(xval_data, label_key)
     end
+
+     
     if length(find(x->x==-1, training_data[label_key])) > 0
       info(env, 2, "$id: Removing unlabeled events and equalizing class counts.")
       training_data, indices = equalize_counts_by_label(training_data, label_key)
       xval_data, indices = equalize_counts_by_label(xval_data, label_key)
+
+      println("training data size ",size(training_data.waveforms))
+      println("validation data size ",size(xval_data.waveforms))
     end
-
-
+    
+    println("Batch size originally: ",n["batch_size"])   
     if eventcount(xval_data) < n["batch_size"]
       n["batch_size"] = eventcount(xval_data)
+      println("Batch size trimmed to size of xval data: ",n["batch_size"])
       info("Cross validation set only has $(eventcount(xval_data)) data points. Adjusting bach size accordingly.")
     end
 

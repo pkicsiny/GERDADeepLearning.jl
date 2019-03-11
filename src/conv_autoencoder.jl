@@ -3,13 +3,13 @@
 using MXNet
 
 
-
-function _build_conv_autoencoder(properties, input_size)
+export _build_conv_autoencoder
+function _build_conv_autoencoder(properties, input_size) #input size is 256, the length of the trace
   batch_size = properties["batch_size"]
   filter_counts = properties["conv_filters"]
   filter_lengths = properties["conv_lengths"]
-  assert(length(filter_counts) == length(filter_lengths))
   pool_sizes = properties["pool_size"]
+  assert(length(filter_counts) == length(filter_lengths) == length(pool_sizes))
   pool_type = properties["pool_type"]
   act_type = properties["activation"]
   conv_dropout = properties["conv_dropout"]
@@ -20,9 +20,8 @@ function _build_conv_autoencoder(properties, input_size)
 
   X = mx.Variable(:data)
   Y = mx.Variable(:label)
-
   # Convolutional layers
-  X = mx.Reshape(X; shape=(1, input_size, 1, batch_size)) #(1, input_size, 1, 0)) # last argument is batch_size
+  X = mx.reshape(X, (1, input_size, 1, batch_size))
   for i in 1:length(filter_counts)
     X = conv_layer("conv_$i", X, filter_counts[i], filter_lengths[i], act_type, pool_sizes[i], pool_type, conv_dropout)
   end
@@ -53,7 +52,6 @@ function _build_conv_decoder(X::mx.SymbolicNode, Y::mx.SymbolicNode, properties,
   conv_dropout = properties["conv_dropout"]
   fc_layers = properties["fc"]
   dropout = properties["dropout"]
-
   last_conv_data_length = Int(full_size / prod(pool_sizes))
 
   for i in (length(fc_layers)-1):-1:1
@@ -61,13 +59,13 @@ function _build_conv_decoder(X::mx.SymbolicNode, Y::mx.SymbolicNode, properties,
   end
   if length(filter_counts) > 0
     X = fc_layer("blow_up", X, filter_counts[end] * last_conv_data_length, act_type, conv_dropout)
-        X = mx.Reshape(X; shape=(1, last_conv_data_length, Int(filter_counts[end]), batch_size))
+        X = mx.reshape(X, (1, last_conv_data_length, Int(filter_counts[end]), batch_size))
   else
     X = fc_layer("blow_up", X, full_size, act_type, conv_dropout)
   end
 
   # Deconvolutions
-  for i in length(filter_counts):-1:2
+  for i in length(filter_counts):-1:2 # goes till 2 inclusive
     X = deconv_layer("deconv_$i", X, filter_counts[i-1], filter_lengths[i], act_type, pool_sizes[i], conv_dropout)
   end
   if length(filter_counts) > 0
@@ -76,12 +74,17 @@ function _build_conv_decoder(X::mx.SymbolicNode, Y::mx.SymbolicNode, properties,
     X = mx.Flatten(X, name=:out) # (batch_size, width, height=1)
   end
     # X = mx.FullyConnected(X, num_hidden=input_size, name=:out)
-  loss = mx.LinearRegressionOutput(X, Y, name=:softmax)
+  loss = mx.LinearRegressionOutput(X, Y, name=:mse)
   return loss, X
 end
 
 
 export autoencoder
+"""
+	autoencoder(env::DLEnv, data; id="autoencoder", action::Symbol=:auto, train_key="train", xval_key="xval")
+
+Parses training and validation data from *data* then calls build() method.
+"""
 function autoencoder(env::DLEnv, data; id="autoencoder", action::Symbol=:auto, train_key="train", xval_key="xval")
 
   if action == :auto
@@ -94,7 +97,6 @@ function autoencoder(env::DLEnv, data; id="autoencoder", action::Symbol=:auto, t
   if action != :load
     training_waveforms = waveforms(data[:set=>train_key])
     xval_data = data[:set=>xval_key]
-
     if eventcount(xval_data) < n["batch_size"]
       n["batch_size"] = eventcount(xval_data)
       info("Cross validation set only has $(eventcount(xval_data)) data points. Adjusting bach size accordingly.")
@@ -176,10 +178,10 @@ end
 export decode
 function decode(compact::EventLibrary, n::NetworkInfo, pulse_size; log=false)
   log && info("$(n.name): decoding '$(compact[:name])'...")
-
   X = mx.Variable(:data)
   Y = mx.Variable(:label) # not needed because no training
   loss, X = _build_conv_decoder(X, Y, n.config, pulse_size)
+
   model = subnetwork(n.model, mx.FeedForward(loss, context=n.context))
 
   batch_size=n["batch_size"]

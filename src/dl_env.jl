@@ -11,7 +11,7 @@ type DLEnv # immutable
   _gpus::Vector{Int}
   _ext_event_libs::Dict{String,DLData}
   _verbosity::Integer # 0: nothing, 1: only errors, 2: default, 3: all
-
+#constructors
   DLEnv() = DLEnv("config")
   DLEnv(name::AbstractString) = DLEnv(abspath(""), name)
 
@@ -34,6 +34,7 @@ function Base.reload(env::DLEnv; replace=false)
   end
 end
 
+#get keys of subdict
 export get_properties
 function get_properties(env::DLEnv, name::AbstractString)
   return get(env.config, name, Dict())
@@ -47,12 +48,13 @@ end
 export new_properties!
 function new_properties!(modifier, env::DLEnv, template_name::AbstractString, new_name::AbstractString)
   d = copy(get_properties(env, template_name))
+
   modifier(d)
   set_properties!(env, new_name, d)
   return d
 end
 
-export resolvepath
+export resolvepath #concats the path
 function resolvepath(env::DLEnv, path::AbstractString...)
   if isabspath(path[1])
     return joinpath(path...)
@@ -65,6 +67,7 @@ function Base.joinpath(env::DLEnv, elements::String...)
   return joinpath(env.dir, elements...)
 end
 
+#verbosity settings
 function Base.info(env::DLEnv, level::Integer, msg::AbstractString)
   if env._verbosity >= level
     threadsafe_info(msg)
@@ -97,7 +100,7 @@ verbose(action, env::DLEnv) = with_verbosity(action, env, 1000)
 export silent
 silent(action, env::DLEnv) = with_verbosity(action, env, 0)
 
-
+#dict indexing with functions
 function Base.getindex(env::DLEnv, key::String)
   return env.config[key]
 end
@@ -110,7 +113,7 @@ function Base.haskey(env::DLEnv, key::String)
   return haskey(env.config, key)
 end
 
-
+#detector types, returns subset of dets
 export detectors
 function detectors(env::DLEnv, dettype::AbstractString)
   if dettype == "BEGe"
@@ -131,33 +134,39 @@ function detectors(env::DLEnv, keywords::AbstractString...)
     return intersect(sets...)
 end
 
-function detectors(env::DLEnv)
-  return phase2_detectors
+function detectors(env::DLEnv) #extended to select detectors
+  if length(length(env.config["raw"]["detectors"])) == 0
+    return phase2_detectors
+  else
+    return string.(filter!(sde->sde ≠ false, [sd in phase2_detectors && sd for sd in env.config["raw"]["detectors"]])) #convert array of any to array of strings
+  end
 end
 
 
 export _create_h5data
 function _create_h5data(env::DLEnv, output_dir)
     info(env, 2, "Reading original data from $(env.config["path"])")
-    isdir(output_dir) || mkdir(output_dir)
+    isdir(output_dir) || mkdir(output_dir) #error if target dir nonnexistent and cannot be created
     if haskey(env.config, "rawformat")
         _seg_to_hdf5(env, output_dir)
     else
         _mgdo_to_hdf5(env, output_dir)
     end
-    info(env, 3, "Converted raw data, HDF5 stored in $output_dir.")
+    info(env, 3, "Converted raw data to HDF5 and stored in $output_dir.")
 end
 
 function _mgdo_to_hdf5(env::DLEnv, output_dir)
   keylists = KeyList[]
-  for (i,keylist_path) in enumerate(env.config["keylists"])
-    if !endswith(keylist_path, ".txt")
+  for (i,keylist_path) in enumerate(env.config["keylists"]) #txt that contains data file names
+    if !endswith(keylist_path, ".txt") #if you left the txt from the end, it adds it
       keylist_path = keylist_path*".txt"
     end
+#extracts whats in the txt (the datafile names) and append content of each .txt to a KeyList object
     push!(keylists, parse_keylist(resolvepath(env, keylist_path), keylist_path))
   end
     load_root(; verbosity=get_verbosity(env))
-    mgdo_to_hdf5(env.config["path"], output_dir, keylists; verbosity=get_verbosity(env))
+#gets keylists (name of .txt, actual datafiles in this txt) as input and reads files
+    mgdo_to_hdf5(env.config["path"], env.config["raw"]["detectors"], output_dir, keylists; verbosity=get_verbosity(env)) # added raw to select detectors
 end
 
 function _seg_to_hdf5(env::DLEnv, output_dir)
@@ -181,17 +190,24 @@ function _seg_to_hdf5(env::DLEnv, output_dir)
     end
 end
 
+#get data
 export getdata
-function getdata(env::DLEnv; preprocessing::Union{AbstractString,Void}=nothing, targets::Array{String}=String[])
+function getdata(env::DLEnv; data::Union{DLData,Void}=nothing, preprocessing::Union{AbstractString,Void}=nothing, targets::Array{String}=String[])
   if preprocessing==nothing
     return get(env, "raw"; targets=targets) do
       _get_raw_data(env; targets=targets)
     end
   else
-    data = _get_raw_data(env; targets=[preprocessing])
-    preprocessed = get(env, preprocessing; targets=targets) do
+#gets raw data and puts them to folder defined by preprocessing
+    if data == nothing
+        data = _get_raw_data(env; targets=[preprocessing])
+    else
+        data = deepcopy(data)
+    end
+    preprocessed = get(env, preprocessing; targets=targets) do #this is the return value
       preprocess(env, data, preprocessing)
     end
+ 
     if preprocessed == nothing
       return nothing
     end
@@ -215,8 +231,10 @@ function getdata(env::DLEnv; preprocessing::Union{AbstractString,Void}=nothing, 
 end
 
 function _get_raw_data(env::DLEnv; targets::Array{String}=String[])
+#dir to put data
   raw_dir = resolvepath(env, "data", "raw")
   if !isdir(raw_dir)
+#get the data from the txts
     _create_h5data(env, raw_dir)
   end
   return lazy_read_all(raw_dir)
@@ -224,53 +242,64 @@ end
 
 
 export preprocess
-function preprocess(env::DLEnv, data::DLData, config_name)
+function preprocess(env::DLEnv, data::DLData, config_name) #config name is "pulses" or "noise"
+"""
+Selects detectors from the detectors key of the dict. Also selects preprocessing configuration settings.
+Applies builtin filters: test pulses, baseline events and nonphysical events.
+Then makes an empty data object for the events, fills in and saves it to a file.
+Then gets the preprocessing steps from the config file.
+Then loops over the selected detectors and applies the preprocessing steps.
+After the preprocessing it filters the events that are failed during pp.
+Then splits the data of the detector into the datasets specified in the config file and writes them into the result file.
+"""
+  info(env,2,"Raw data has $(eventcount(data)) events.")
   config = env.config[config_name]
   @assert isa(config, Dict)
-
   select_channels=parse_detectors(config["detectors"])
   info(env, 3, "Selected channels: $select_channels")
   if isa(select_channels,Vector) && length(select_channels) > 0
     filter!(data, :detector_name, select_channels)
   end
-
   _builtin_filter(env, config, "test-pulses", data, :isTP, isTP -> isTP == 0)
+  info(env,3,"filtering non-test pulses: $(eventcount(data)) events left")
   _builtin_filter(env, config, "baseline-events", data, :isBL, isBL -> isBL == 0)
+  info(env,3,"filtering non-baseline events: $(eventcount(data)) events left")
   _builtin_filter(env, config, "unphysical-events", data, :E, E -> (E > 0) && (E < 9999))
-  _builtin_filter(env, config, "low-energy-events", data, :E, E -> (E > 0) && (E < 1000))
-
-  N_dset = length(parse_datasets(env, config["sets"]))
+  info(env,3,"filtering unphysical events: $(eventcount(data)) events left")
+  _builtin_filter(env, config, "high-multiplicity-events", data, :multiplicity, multiplicity -> multiplicity == 1)
+  info(env,3,"filtering single multiplicity events: $(eventcount(data)) events left")
+  _builtin_filter(env, config, "pileup-events", data, :isPileup, isPileup -> isPileup == 0)
+  info(env,3,"filtering non-pileup events: $(eventcount(data)) events left")
+  N_dset = length(parse_datasets(env, config["sets"]))  # sets are train val and test with ratios
   result = DLData(fill(EventLibrary(zeros(0,0)), length(data)*N_dset))
   result.dir = _cachedir(env, "tmp-preprocessed-$config_name")
-
   steps = convert(Array{String}, config["preprocessing"])
-
+  
   for i in 1:length(data)
     lib = data.entries[i]
-    info(env,2, "Preprocessing $(lib[:name])")
-    lib_t = preprocess_transform(env, lib, steps; copyf=identity)
-    _builtin_filter(env, config, "failed-preprocessing", lib_t, :FailedPreprocessing, fail -> fail == 0)
+    lib_t = preprocess_transform(env, lib, steps; copyf=identity)  # do actual prerpocessing
+    #_builtin_filter(env, config, "failed-preprocessing", lib_t, :FailedPreprocessing, fail -> fail == 0)
+    #info(env,3,"filtering failed-pp events: $(eventcount(data)) events left")
     part_data = DLData(collect(values(split(env, lib_t, config["sets"]))))
-    write_all_sequentially(part_data, result.dir, true)
+    write_all_sequentially(part_data, result.dir, true)  # write it into file
     info(env,3, "Wrote datasets of $(lib[:name]) and released allocated memory.")
     dispose(lib)
     dispose(lib_t)
-    for j in 1:length(part_data)
-      result.entries[N_dset*(i-1) + j] = part_data.entries[j]
+    for j in 1:length(part_data)  # usually train, xval, test, so 3
+      result.entries[N_dset*(i-1) + j] = part_data.entries[j]  # 1,2,3; 4,5,6: ... puts everything in results dict like train,val,test,train,val,test,...
     end
     @assert length(lib.waveforms) == 0 && length(lib_t.waveforms) == 0
   end
 
-  return result
+  return result # dict of split datasets
 end
 
 
 function _builtin_filter(env::DLEnv, config::Dict, ftype_key::String, data::EventCollection, label, exclude_prededicate)
   # TODO per detector to save memory
   ftype = config[ftype_key]
-  info(env, 3, "Filter $ftype_key is set to $ftype.")
   if ftype == "exclude"
-    result = filter!(data, label, exclude_prededicate)
+    result = filter!(data, label, exclude_prededicate)  
     return result
   elseif ftype == "include"
     return data
@@ -282,23 +311,28 @@ function _builtin_filter(env::DLEnv, config::Dict, ftype_key::String, data::Even
 end
 
 
+#reads datasets and ratios from env (config)
+export parse_datasets
 function parse_datasets(env::DLEnv, strdict::Dict)
+#empty dict
   result = Dict{AbstractString,Vector{AbstractFloat}}()
-  if haskey(env.config, "keylists")
-    requiredlength = length(env["keylists"])
+  if haskey(env.config, "keylists") # keylists contains data file txt names
+    requiredlength = length(env["keylists"]) # as many files I read
   else
     requiredlength = 1
   end
-  for (key,value) in strdict
-    if isa(value, Vector)
+  for (key,value) in strdict #loop over train, val and test
+
+    if isa(value, Vector) # I can specify datasets per file, different for each but then the length of the array must match as many files I have
       @assert length(value) == requiredlength
       result[key] = value
-    elseif isa(value, Real)
-      result[key] = fill(value, requiredlength)
+    elseif isa(value, Real) #same ratios for all files
+      result[key] = fill(value, requiredlength) # creates requiredlength long array with all values being value
     else
       throw(ConfigurationException())
     end
   end
+#result contains datasets train, xval and test with their ratios
   return result
 end
 
@@ -401,10 +435,12 @@ function Base.delete!(env::DLEnv, lib_name::String)
   end
 end
 
+#define directory of env, if nonexistent, then creates the dir
 function _cachedir(env::DLEnv, lib_name::String)
   return joinpath(env.dir, "data", lib_name)
 end
 
+export network
 function network(env::DLEnv, name::String)
     dir = joinpath(env.dir, "models", name)
     isdir(dir) || mkdir(dir)
@@ -415,3 +451,5 @@ export use_gpus
 function use_gpus(env, gpus::Int...)
   env._gpus = [gpus...]
 end
+
+

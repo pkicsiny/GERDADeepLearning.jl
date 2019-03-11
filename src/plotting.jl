@@ -243,7 +243,7 @@ function plot_waveform_comparisons(env::DLEnv, libs::EventLibrary...; count=20, 
   return libs
 end
 
-
+export visualize_1D_convolution
 function visualize_1D_convolution(model, name, filename)
   for param in model.arg_params
     if(param[1] == name)

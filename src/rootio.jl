@@ -1,6 +1,6 @@
 # This file is a part of GERDADeepLearning.jl, licensed under the MIT License (MIT).
 
-using Base.Threads, MultiThreadingTools, HDF5
+using Base.Threads, MultiThreadingTools, HDF5, IJulia
 
 global root_loaded = false
 
@@ -19,41 +19,58 @@ function load_root(; verbosity=2)
     verbosity >= 3 && info("ROOT loaded")
 end
 
-function mgdo_to_hdf5(base_path::AbstractString, output_dir::AbstractString, keylists::Vector{KeyList}; sample_size=1000, verbosity=2)
+function mgdo_to_hdf5(base_path::AbstractString, selected_detectors::AbstractArray, output_dir::AbstractString, keylists::Vector{KeyList}; sample_size=1000, verbosity=2)
 
-  label_keys = [:keylist=>Int8, :timestamp=>UInt64, :E=>Float32, :AoE=>Float32, :AoE_class=>Int8, :ANN_mse_class=>Int8, :ANN_alpha_class=>Int8, :isTP=>Int8, :isBL=>Int8, :multiplicity=>Int32, :isMuVetoed=>Int8, :isLArVetoed=>Int8]
+  label_keys = [:keylist=>Int8, :timestamp=>UInt64, :E=>Float32, :AoE=>Float32, :AoE_class=>Int8, :ANN_mse_class=>Int8,
+ :ANN_alpha_class=>Int8, :isTP=>Int8, :isBL=>Int8, :multiplicity=>Int32, :isMuVetoed=>Int8, :isLArVetoed=>Int8,
+ :isPileup=>Int32, :risetime=>Float32]
 
+  #preselect detectors
+  if length(selected_detectors) == 0
+    load_detectors = phase2_detectors
+    selected_detector_indices = find(x->x in phase2_detectors,phase2_detectors)
+  else
+    load_detectors = string.(filter!(sde->sde ≠ false, [sd in phase2_detectors && sd for sd in selected_detectors])) #convert array of any to array of strings
+    selected_detector_indices = find(x->x in selected_detectors, phase2_detectors)
+  end
+  println(selected_detector_indices)
   # Create HDF5 extendible storage
-  h5files, h5_arrays = create_extendible_hdf5_files(output_dir, keylists, phase2_detectors, sample_size, 256, label_keys)
+  h5files, h5_arrays = create_extendible_hdf5_files(output_dir, keylists, phase2_detectors, sample_size, 256, label_keys) #changed from phase2_detectors
 
   try
     file_count = length(merge(keylists...))
     total_file_i = 0
     for (keylist_id, keylist) in enumerate(keylists)
       for (file_i,filekey) in enumerate(keylist.entries)
+	verbosity >= 3 && tic() # measure reading time
         total_file_i += 1
         file1 = path(base_path, filekey, :tier1)
+	file3 = path(base_path, filekey, :tier3) # path of tier 3
         file4 = path(base_path, filekey, :tier4)
+	verbosity >= 2 && IJulia.clear_output(true)
         if !isfile(file1)
           verbosity >= 1 && info("Skipping entry because tier1 file does not exist: $file1")
+	elseif !isfile(file3)
+            verbosity >= 1 && info("Skipping entry because tier3 file does not exist: $file3")
         elseif !isfile(file4)
             verbosity >= 1 && info("Skipping entry because tier4 file does not exist: $file4")
         else
           verbosity >= 2 && info("Reading file $total_file_i / $file_count...")
           verbosity >= 3 && info("Tier1: $file1")
+	  verbosity >= 3 && info("Tier3: $file3")
           verbosity >= 3 && info("Tier4: $file4")
           is_physics_data = filekey.event_type == :phy
           results = ThreadLocal{Any}()
           # Run every thread over part of the data
           @everythread begin
-            thread_result = read_single_thread_single_file(phase2_detectors, file1, file4, label_keys, verbosity, sample_size, keylist_id, is_physics_data)
-            results[] = thread_result
+            thread_result = read_single_thread_single_file(selected_detector_indices, phase2_detectors, file1, file3, file4, label_keys, verbosity, sample_size, keylist_id, is_physics_data) #changed from phase2_detectors
+	    results[] = thread_result
           end
-
           # Write parts to HDF5 files
           results = merge_labels_per_detector(all_thread_values(results), label_keys)
           append_to_hdf5(results, h5_arrays, verbosity)
         end
+        verbosity >= 3 && info("Elapsed time: $(toq()) seconds")
       end
     end
   catch exc
@@ -70,13 +87,17 @@ function mgdo_to_hdf5(base_path::AbstractString, output_dir::AbstractString, key
 end
 
 
-function read_single_thread_single_file(detector_names, file1, file4, label_keys, verbosity, sample_size, keylist_id, is_physics_data::Bool)
+function read_single_thread_single_file(selected_detector_indices, detector_names, file1, file3, file4, label_keys, verbosity, sample_size, keylist_id, is_physics_data::Bool)
+  """
+  Reads flags from ROOT files.
+  """
+  println("wont read bl and tp")
   # Create thread-local arrays
   tier4_bindings = TTreeBindings()
+  tier3_bindings = TTreeBindings()
   branch_timestamp = tier4_bindings[:timestamp] = Ref(zero(UInt64))
   branch_energies = tier4_bindings[:energy] = zeros(Float64, 0)
   branch_event_ch = tier4_bindings[:eventChannelNumber] = Ref(zero(Int32))
-  # branch_timestamp = tier4_bindings[:timestamp] = Ref(zero(UInt64))
   branch_aoeVeto = tier4_bindings[:isAoEvetoed] = zeros(Int32, 0)
   branch_aoeEval = tier4_bindings[:isAoEevaluated] = Bool[]
   branch_aoeVal = tier4_bindings[:AoEclassifier] = zeros(Float64, 0)
@@ -88,46 +109,50 @@ function read_single_thread_single_file(detector_names, file1, file4, label_keys
   branch_ANN_mse_flag = tier4_bindings[:psdFlag_ANN_mse] = zeros(Int32, 0)
   branch_ANN_alpha_eval = tier4_bindings[:psdIsEval_ANN_alpha] = Bool[]
   branch_ANN_alpha_flag = tier4_bindings[:psdFlag_ANN_alpha] = zeros(Int32, 0)
-  if is_physics_data
-    branch_isLArVetoed = tier4_bindings[:isLArVetoed] = Ref(zero(Int32))
-  end
-
+  branch_isLArVetoed = tier4_bindings[:isLArVetoed] = Ref(zero(Int32))
+  branch_pileup = tier3_bindings[:failedFlag_is0vbbFromCal] = zeros(Int32,0) # a 40 element array for each event
+  branch_risetime = tier3_bindings[:risetime1090] = zeros(Float64, 0)
+  
   # Prepare tables
-  result, keylist, timestamp, E, AoE, AoE_class, ANN_mse_class, ANN_alpha_class, isTP, isBL, multiplicity, isMuVetoed, isLArVetoed = create_label_arrays(label_keys, length(detector_names))
+  result, keylist, timestamp, E, AoE, AoE_class, ANN_mse_class, ANN_alpha_class, isTP, isBL, multiplicity, isMuVetoed, isLArVetoed, isPileup, risetime = create_label_arrays(label_keys, length(detector_names))
   waveforms = [Vector{Float32}[] for i in 1:length(detector_names)]
   result[:waveforms] = waveforms
-
+  
   # Open tree and read events
   open(MGTEventTree{JlMGTEvent}, file1) do tier1_tree
+   open(TChainInput, tier3_bindings, "tier3", file3) do tier3_input
     open(TChainInput, tier4_bindings, "tier4", file4) do tier4_input
 
       assert(length(tier1_tree) == length(tier4_input))
       n = length(tier1_tree)
-
       for i in threadpartition(eachindex(tier1_tree))
         t1_evt = tier1_tree[i]
+	tier3_input[i]
         tier4_input[i]
-
         for (no_in_event, detector_i) in enumerate(t1_evt.waveforms.ch) # 0:39
           detector = detector_i + 1
-
-          if branch_energies[detector] > 0
+          if (branch_energies[detector] > 0 && branch_isBL.x == 0 && branch_isTP.x == 0) && detector in selected_detector_indices
               push!(waveforms[detector], convert(Array{Float32}, t1_evt.aux_waveforms.samples[no_in_event]))
-
+	      
               push!(keylist[detector], keylist_id)
               push!(timestamp[detector], branch_timestamp.x)
               push!(E[detector], branch_energies[detector])
-
+	      #println(typeof(branch_isBL.x))
               push!(isTP[detector], branch_isTP.x)
               push!(isBL[detector], branch_isBL.x)
               push!(multiplicity[detector], branch_multiplicity.x)
               push!(isMuVetoed[detector], branch_isMuVetoed.x)
-              if is_physics_data
-                push!(isLArVetoed[detector], branch_isLArVetoed.x)
-              else
-                push!(isLArVetoed[detector], 0)
-              end
 
+              if is_physics_data #phy
+                push!(isLArVetoed[detector], branch_isLArVetoed.x)
+		push!(isPileup[detector], 0)
+              else # cal	
+		push!(isLArVetoed[detector], 0)
+		push!(isPileup[detector], branch_pileup[detector])
+	      end
+
+	      # risetime
+              push!(risetime[detector], branch_risetime[detector])
               # A/E
               push!(AoE[detector], branch_aoeVal[detector])
               if branch_aoeEval[detector]
@@ -147,12 +172,14 @@ function read_single_thread_single_file(detector_names, file1, file4, label_keys
               else
                 push!(ANN_alpha_class[detector], -1)
               end
+	      
            end # if E
         end # for
       end # for
+     end
     end # open
   end # open
-
+  
   return result
 end
 
