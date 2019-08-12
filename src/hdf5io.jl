@@ -6,9 +6,9 @@ type EventFormatException <: Exception
   msg::String
 end
 
-
-function create_libroot(h5file, libname) # highest group of h5 file
-  libroot = g_create(h5file, libname)
+export create_libroot
+function create_libroot(h5file, h5_libname) # highest group of h5 file
+  libroot = g_create(h5file, h5_libname)
   attrs(libroot)["type"] = "EventLibrary"
   attrs(libroot)["version"] = "1.0"
   return libroot
@@ -61,22 +61,28 @@ function create_extendible_hdf5_files(output_dir, keylists, detector_names, samp
 end
 
 
-function lazy_read_all(dir::AbstractString) #reads .h5 files from directory
+function lazy_read_all(dir::AbstractString; h5_libname::String="") #reads .h5 files from directory
   files = readdir(dir) #.h5 files in eg "raw" folder
   files = filter(f->endswith(f, ".h5"), files) #hdf5 files in dir
-  names = [file[1:end-3] for file in files]
+  names = [file[1:end-3]*h5_libname for file in files]
   libs = [lazy_read_library(joinpath(dir, files[i]), names[i]) for i in 1:length(files)]
   result = DLData(libs) #assembly of event libs
   result.dir = dir
   return result
 end
 
-function lazy_read_library(h5_filepath, libname) #generate julia e.l. by reading from hdf5 file
-  init = lib -> _initialize_from_file(lib, h5_filepath, libname)
+export lazy_read_library
+"""
+Loads one .h5 file into an EventLibrary.
+h5_filepath: path of form /home/.../detname.h5
+h5_libname: detector name like 'ANG1'
+"""
+function lazy_read_library(h5_filepath, h5_libname) #generate julia e.l. by reading from hdf5 file
+  init = lib -> _initialize_from_file(lib, h5_filepath, h5_libname)
   lib =  EventLibrary(init) #the julia event library of the data
 
   ifile = h5open(h5_filepath, "r")
-  libroot = ifile[libname] #the group of the h5 file
+  libroot = ifile[h5_libname] #the group of the h5 file
   
   #checks attributes of h5file (he defined this way so they are the same always)
   if read(attrs(libroot)["type"]) != "EventLibrary"
@@ -106,14 +112,14 @@ function lazy_read_library(h5_filepath, libname) #generate julia e.l. by reading
   return lib #julia event library with structure and props and empty label values
 end
 
-function _initialize_from_file(lib::EventLibrary, h5_filepath, libname)
+function _initialize_from_file(lib::EventLibrary, h5_filepath, h5_libname)
+  #opens hdf5 file and decodes waveforms and labels
   h5open(h5_filepath, "r") do ifile
-    libroot = ifile[libname]
-
+    libroot = ifile[h5_libname]
     # Read waveforms
     try
       lib.waveforms = read(libroot["waveforms"])
-    catch err
+    catch err # also catches memory errors
       info("Illegal waveform data for lib $(lib[:name]).")
       lib.waveforms = zeros(Float32, 1, 0)
     end
@@ -155,7 +161,7 @@ end
 export write_lib
 function write_lib(lib::EventLibrary, filepath::AbstractString, uninitialize::Bool)
   h5open(filepath, "w") do h5file
-    libroot = create_libroot(h5file, lib[:name])
+    libroot = create_libroot(h5file, lib[:name]) #xy_preprocessed_all or xy
 
     write(libroot, "waveforms", waveforms(lib))
 

@@ -47,7 +47,7 @@ export PlotCallback
 type PlotCallback <: mx.AbstractEpochCallback
     graphs::Dict{Symbol, Array{Float32,1}}
 
-    PlotCallback() = new(Dict{Symbol, Array{Float32,2}}())
+    PlotCallback() = new(Dict{Symbol, Array{Float32,1}}())
 end
 
 
@@ -91,56 +91,6 @@ function calculate_parameters(model, filepath)
    end
  end
 
-# function exists_device(ctx::mx.Context)
-#  try
-#    mx.ones(Float32, (1,1), ctx)
-#    return true
-#  catch err
-#    return false
-#  end
-# end
-#
-#
-#  best_device_cache = nothing
-#
-# export best_device
-#  function best_device()
-#    global best_device_cache
-#    if best_device_cache == nothing
-#      gpus = list_xpus(mx.gpu)
-#      if length(gpus) > 0
-#        best_device_cache = gpus
-#        info("$(length(gpus)) GPUs found.")
-#      else
-#        best_device_cache = mx.cpu()
-#        info("No GPUs available, fallback to single CPU.")
-#      end
-#    end
-#    return best_device_cache
-#  end
-#
-# export use_gpu
-# function use_gpu(id)
-#   global best_device_cache
-#   if exists_device(mx.gpu(id))
-#     best_device_cache = mx.gpu(id)
-#   else
-#     info("Could not access GPU $id, fallback to CPU")
-#     best_device_cache = mx.cpu()
-#   end
-# end
-#
-# export list_xpus
-# function list_xpus(xpu=mx.gpu)
-#   result = mx.Context[]
-#   while exists_device(xpu(length(result))) && length(result) < 8
-#     push!(result, xpu(length(result)))
-#   end
-#   return result
-# end
-
-
-
  type NetworkInfo
    name::String
    dir::AbstractString
@@ -150,11 +100,11 @@ function calculate_parameters(model, filepath)
    epoch::Integer # the current state of the model, initialized to 0.
    training_curve::Vector{Float64} # MSE, created during training
    xval_curve::Vector{Float64} # MSE, created on demand
+#   second_training_curve::Vector{Float64}
 
    NetworkInfo(name::String, dir::AbstractString, config::Dict, context) =
       new(name, dir, config, context, nothing, 0, Float64[], Float64[])
  end
-
 
 Base.getindex(n::NetworkInfo, key::AbstractString) = n.config[key]
 Base.setindex!(n::NetworkInfo, value, key::AbstractString) = n.config[key] = value
@@ -197,7 +147,7 @@ end
 export train
 function train(n::NetworkInfo,
       train_provider, eval_provider;
-      verbosity=2)
+      weight_init=true, verbosity=3)
   learning_rate = n["learning_rate"]
   epochs = n["epochs"]
   optimizer_name = n["optimizer"]
@@ -209,33 +159,17 @@ function train(n::NetworkInfo,
 
   training_curve = PlotCallback()
   eval_curve = Float64[]
+  #second_training_curve = Float64[]
 
   metric = mx.MSE()
 
-  if optimizer_name == "SGD"
-    optimizer = mx.SGD(lr=learning_rate, momentum=n["momentum"])
-  elseif optimizer_name == "ADAM"
-    optimizer = mx.ADAM(lr=learning_rate, lr_scheduler=mx.LearningRate.Exp(learning_rate, gamma=0.9)) #add learning rate scheduler
-  elseif optimizer_name == "None"
-    optimizer = mx.SGD(lr=1e-9)
-  end
-  # optimizer = mx.SGD(lr=learning_rate, momentum=0.9)
+  optimizer = set_optimizer(optimizer_name, learning_rate, gamma=0.9)
 
   # Manual initialization
-  if !isdefined(n.model, :arg_params)
+  if !isdefined(n.model, :arg_params)&&weight_init
+    info("Weight initialization.")
     mx.init_model(n.model, mx.UniformInitializer(0.1); overwrite=false, [mx.provide_data(train_provider)..., mx.provide_label(train_provider)...]...)
   end
-
-  verbosity >= 2 && info("$(train_provider.sample_count) data points, $(get_total_parameter_count(n.model)) learnable parameters, dropout=$(n["dropout"]), batch size $(train_provider.batch_size), using $optimizer_name with learning rate $learning_rate\u1b[K")
-  verbosity >= 2 && info("Starting training on $(n.model.ctx) (from $(n.epoch+1) to $epochs)... \u1b[K")
-  verbosity >= 3 && info("Untrained MSE: $(eval_pred(n.model, eval_provider, mx.MSE())[1][2])\u1b[K")
-  flush(STDOUT)
-
-  # for arg_param in n.model.arg_params
-  #   print("$(arg_param[1]): ")
-  #   println(copy(arg_param[2])[1:min(8, length(arg_param[2]))])
-  # end
-  # kvstore, update_on_kvstore = mx_create_kvstore(:device, length(n.model.ctx), n.model.arg_params)
 
   # Train each step manually
   for epoch in (n.epoch+1) : epochs
@@ -246,14 +180,14 @@ function train(n::NetworkInfo,
            verbosity=0,
            kvstore=:device)
     save_compatible_checkpoint(n.model.arch, n.model.arg_params, n.model.aux_params, joinpath(n.dir,n.name), epoch)
-
+# get validation metric
     eval_mse = eval_pred(n.model, eval_provider, mx.MSE())[1][2]
     push!(eval_curve, eval_mse)
+    #train_mse = eval_pred(n.model, train_provider, mx.MSE())[1][2]
+    #push!(second_training_curve, train_mse)
     verbosity >= 3 && info("Epoch $epoch / $epochs: MSE = $eval_mse.")
     verbosity >= 3 && flush(STDOUT)
   end
-
-  # mx.fit(n.model, optimizer, train_provider, n_epoch=epochs, eval_metric=metric, callbacks=[training_curve], kvstore=:device) # TODO
 
   n.epoch = epochs
 
@@ -261,6 +195,7 @@ function train(n::NetworkInfo,
 
   append!(n.training_curve, training_curve.graphs[:MSE])
   append!(n.xval_curve, eval_curve)
+  #append!(n.second_training_curve, second_training_curve)
   writedlm(joinpath(n.dir,n.name*"-MSE-train.txt"), n.training_curve)
   writedlm(joinpath(n.dir,n.name*"-MSE-xval.txt"), n.xval_curve)
 end
@@ -269,7 +204,7 @@ end
 export build
 function build(n::NetworkInfo, method::Symbol,
     train_provider, eval_provider, build_function;
-    verbosity=2
+    verbosity=2, weight_init=true
   )
   target_epoch = n["epochs"]
   slim = n["slim"]
@@ -285,8 +220,8 @@ function build(n::NetworkInfo, method::Symbol,
   if method == :train
     loss, net = build_function(n.config, size(train_provider.data_arrays[1],1))
     n.model = mx.FeedForward(loss, context=n.context)
-    train(n, train_provider, eval_provider; verbosity=verbosity)
-    load_network(n, target_epoch)
+    train(n, train_provider, eval_provider; verbosity=verbosity, weight_init=weight_init)
+    load_network(n, target_epoch; pick_best=true)
   elseif method == :load
     load_network(n, target_epoch)
   elseif method == :refine
@@ -338,7 +273,7 @@ end
 
 
 export load_network
- function load_network(n::NetworkInfo, max_epoch; output_name="mse", delete_unneeded_arguments=true, pick_best=true)
+ function load_network(n::NetworkInfo, max_epoch; output_name="loss", delete_unneeded_arguments=true, pick_best=true)
    
    if max_epoch < 0
      max_epoch = last_epoch(n.dir, n.name)
@@ -359,7 +294,7 @@ export load_network
    return n
  end
 
- function load_network_checkpoint(n::NetworkInfo, epoch; output_name="mse", delete_unneeded_arguments=true)
+ function load_network_checkpoint(n::NetworkInfo, epoch; output_name="loss", delete_unneeded_arguments=true)
    sym, arg_params, aux_params = mx.load_checkpoint(joinpath(n.dir, n.name), epoch)
    n.model = subnetwork(sym, arg_params, aux_params, output_name, delete_unneeded_arguments, n.context)
    n.epoch = epoch
@@ -385,6 +320,7 @@ export load_network
    return model
  end
 
+export subnetwork
  function subnetwork(network::mx.FeedForward, subnetwork::mx.FeedForward)
    subnetwork.arg_params = copy(network.arg_params)
    subnetwork.aux_params = copy(network.aux_params)

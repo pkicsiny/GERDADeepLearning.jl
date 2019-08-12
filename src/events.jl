@@ -354,6 +354,7 @@ function eventcount(data::DLData)
     return sum([eventcount(lib) for lib in data.entries])
 end
 
+
 Base.haskey(events::EventLibrary, key::Symbol) = haskey(events.labels, key) || haskey(events.prop, key)
 Base.haskey(data::DLData, key::Symbol) = length(data) > 0 && haskey(data.entries[1])
 
@@ -597,7 +598,7 @@ function label_energy_peaks!(data::DLData, label_key::Symbol, peaks0=[1620.7], p
 end
 
 function _get_label(energy, peaks0, peaks1, half_window)
-#labels energy peaks, labels event is its energy is within half window range from the peak energy
+#labels energy peaks, labels event if its energy is within half window range from the peak energy
   for peak0 in peaks0
     if abs(energy-peak0) <= half_window
       return 0
@@ -612,20 +613,20 @@ function _get_label(energy, peaks0, peaks1, half_window)
 end
 
 export equalize_counts_by_label
-function equalize_counts_by_label(events::EventLibrary, label_key=:SSE)
+function equalize_counts_by_label(events::EventLibrary, label_function, label_key=:SSE)
   
   if !haskey(events, label_key) #if not labeled, label now
-    label_energy_peaks!(events, label_key)
+    # label_energy_peaks!(events, label_key)
+    label_function(events, label_key)
   end
   
   labels = events.labels[label_key]
  #search for labeled peaks
-  i_SSE = find(x -> x==1, labels)
-  i_MSE = find(x -> x==0, labels)
+  i_SSE = find(x -> x==1, labels) # or surface
+  i_MSE = find(x -> x==0, labels) # or bulk
 
   count = min(length(i_SSE), length(i_MSE))
-  println("No of labels for each peak for $label_key ",count)
-  info("Equalizing $(events[:name]) to $count counts. SSE: $(length(i_SSE)), MSE: $(length(i_MSE))")
+  info("Equalizing $(events[:name]) to $count counts. SSE/surface: $(length(i_SSE)), MSE/bulk: $(length(i_MSE))")
 
   # trim and shuffle
   used_indices = [i_SSE[1:count];i_MSE[1:count]]

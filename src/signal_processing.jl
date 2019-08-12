@@ -88,7 +88,7 @@ export baseline
 function baseline(events::EventLibrary)
   events = charge_pulses(events; create_new=false)
 
-  bl_size = Int64(round(sample_size(events) / 5)) # first 200 samples
+  bl_size = Int64(round(sample_size(events) / 5))
   weights = hamming(bl_size)
   weights /= sum(weights)
 
@@ -162,24 +162,10 @@ function align_midpoints(events::EventLibrary; center_y=0.5, target_length=256)
   return events
 end
 
-export extract_noise
-function extract_noise(events::EventLibrary; target_length=256)
-  s = sample_size(events) #length of a raw trace: 1000
-  rwf = zeros(Float32, target_length, eventcount(events))
-
-  @everythread for i in threadpartition(1:eventcount(events))
-    rwf[:,i] = events.waveforms[(s-target_length+1):s , i] #result trace is target_length long
-    rwf[:,i] -= mean(rwf[:,i]) # takes the part after the charge rise, cuts it and subtracts mean
-  end
-
-  events.waveforms = rwf
-
-  return events
-end
-
 export normalize_energy
 function normalize_energy(events::EventLibrary; value=1)
   charges = charge_pulses(events; create_new=true)
+
   top_size = Int64(round(sample_size(events) / 5))
   weights = hamming(top_size)
   weights /= sum(weights)
@@ -187,7 +173,7 @@ function normalize_energy(events::EventLibrary; value=1)
   top_levels = zeros(Float32, eventcount(events))
 
   @everythread for i in threadpartition(1:eventcount(events))
-    top_level = dot(charges.waveforms[(end-top_size+1) : end, i], weights) #last fifth part of waveform traces weighted with hamming window
+    top_level = dot(charges.waveforms[(end-top_size+1) : end, i], weights)
     top_levels[i] = top_level
     events.waveforms[:,i] *= value / top_level
   end
@@ -203,6 +189,25 @@ function denoise_waveforms!(events::EventLibrary; designmethod=Butterworth(5), l
   for i in 1:size(waveforms,2)
         waveforms[:,i] = filtfilt(ff, waveforms[:,i])
   end
+end
+
+export extract_noise
+function extract_noise(events::EventLibrary; target_length=200, method="first")
+  s = sample_size(events) #length of a raw trace: 1000
+  rwf = zeros(Float32, target_length, eventcount(events))
+
+  @everythread for i in threadpartition(1:eventcount(events))
+    if method=="first"
+    	rwf[:,i] = events.waveforms[1:target_length, i]
+    else
+    	rwf[:,i] = events.waveforms[(s-target_length+1):s , i] #result trace is target_length long
+    end
+    rwf[:,i] -= mean(rwf[:,i]) # takes the part after the charge rise, cuts it and subtracts mean
+  end
+
+  events.waveforms = rwf
+
+  return events
 end
 
 function denoise_waveforms!(data::DLData; designmethod=Butterworth(5), lowpass_cutoff=0.2)
@@ -309,7 +314,7 @@ function calculate_deviation(pulses::EventCollection, reconst::EventCollection, 
 
     wf_pulses = waveforms(pulses)
     wf_reconst = waveforms(reconst)
-    wf_noise = waveforms(noise)
+    wf_noise = waveforms(noise)[1:150,:]
 
     for i in 1:eventcount(pulses)
         std_reconst[i] = std(wf_reconst[:,i]-wf_pulses[:,i])

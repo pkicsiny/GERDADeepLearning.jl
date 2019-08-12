@@ -23,7 +23,7 @@ function mgdo_to_hdf5(base_path::AbstractString, selected_detectors::AbstractArr
 
   label_keys = [:keylist=>Int8, :timestamp=>UInt64, :E=>Float32, :AoE=>Float32, :AoE_class=>Int8, :ANN_mse_class=>Int8,
  :ANN_alpha_class=>Int8, :isTP=>Int8, :isBL=>Int8, :multiplicity=>Int32, :isMuVetoed=>Int8, :isLArVetoed=>Int8,
- :isPileup=>Int32, :risetime=>Float32]
+ :isPileup=>Int32, :risetime=>Float32, :run=>Int16]
 
   #preselect detectors
   if length(selected_detectors) == 0
@@ -91,7 +91,9 @@ function read_single_thread_single_file(selected_detector_indices, detector_name
   """
   Reads flags from ROOT files.
   """
-  println("wont read bl and tp")
+  #extract run number
+  event_run = parse(Int16,file1[findfirst("run", file1).+4])
+
   # Create thread-local arrays
   tier4_bindings = TTreeBindings()
   tier3_bindings = TTreeBindings()
@@ -114,7 +116,7 @@ function read_single_thread_single_file(selected_detector_indices, detector_name
   branch_risetime = tier3_bindings[:risetime1090] = zeros(Float64, 0)
   
   # Prepare tables
-  result, keylist, timestamp, E, AoE, AoE_class, ANN_mse_class, ANN_alpha_class, isTP, isBL, multiplicity, isMuVetoed, isLArVetoed, isPileup, risetime = create_label_arrays(label_keys, length(detector_names))
+  result, keylist, timestamp, E, AoE, AoE_class, ANN_mse_class, ANN_alpha_class, isTP, isBL, multiplicity, isMuVetoed, isLArVetoed, isPileup, risetime, run = create_label_arrays(label_keys, length(detector_names))
   waveforms = [Vector{Float32}[] for i in 1:length(detector_names)]
   result[:waveforms] = waveforms
   
@@ -131,7 +133,7 @@ function read_single_thread_single_file(selected_detector_indices, detector_name
         tier4_input[i]
         for (no_in_event, detector_i) in enumerate(t1_evt.waveforms.ch) # 0:39
           detector = detector_i + 1
-          if (branch_energies[detector] > 0 && branch_isBL.x == 0 && branch_isTP.x == 0) && detector in selected_detector_indices
+          if (branch_isBL.x != 0) && detector in selected_detector_indices
               push!(waveforms[detector], convert(Array{Float32}, t1_evt.aux_waveforms.samples[no_in_event]))
 	      
               push!(keylist[detector], keylist_id)
@@ -142,6 +144,7 @@ function read_single_thread_single_file(selected_detector_indices, detector_name
               push!(isBL[detector], branch_isBL.x)
               push!(multiplicity[detector], branch_multiplicity.x)
               push!(isMuVetoed[detector], branch_isMuVetoed.x)
+	      push!(run[detector], event_run)
 
               if is_physics_data #phy
                 push!(isLArVetoed[detector], branch_isLArVetoed.x)
