@@ -3,13 +3,13 @@
 using MXNet
 
 
-
-function _build_conv_autoencoder(properties, input_size)
+export _build_conv_autoencoder
+function _build_conv_autoencoder(properties, input_size) #input size is 256, the length of the trace
   batch_size = properties["batch_size"]
   filter_counts = properties["conv_filters"]
   filter_lengths = properties["conv_lengths"]
-  assert(length(filter_counts) == length(filter_lengths))
   pool_sizes = properties["pool_size"]
+  assert(length(filter_counts) == length(filter_lengths) == length(pool_sizes))
   pool_type = properties["pool_type"]
   act_type = properties["activation"]
   conv_dropout = properties["conv_dropout"]
@@ -20,14 +20,12 @@ function _build_conv_autoencoder(properties, input_size)
 
   X = mx.Variable(:data)
   Y = mx.Variable(:label)
-
   # Convolutional layers
-  X = mx.Reshape(X; shape=(1, input_size, 1, batch_size)) #(1, input_size, 1, 0)) # last argument is batch_size
+  X = mx.reshape(X, (1, input_size, 1, batch_size))
   for i in 1:length(filter_counts)
     X = conv_layer("conv_$i", X, filter_counts[i], filter_lengths[i], act_type, pool_sizes[i], pool_type, conv_dropout)
   end
   X = mx.Flatten(X)
-
   # Fully connected layers
   for i in 1:(length(fc_layers)-1)
     X = fc_layer("fc_$i", X, fc_layers[i], act_type, dropout)
@@ -42,6 +40,7 @@ function _build_conv_decoder(full_size, properties, input_size)
   return _build_conv_decoder(X, Y, properties, full_size)
 end
 
+export _build_conv_decoder
 function _build_conv_decoder(X::mx.SymbolicNode, Y::mx.SymbolicNode, properties, full_size)
   batch_size = properties["batch_size"]
   filter_counts = properties["conv_filters"]
@@ -53,7 +52,6 @@ function _build_conv_decoder(X::mx.SymbolicNode, Y::mx.SymbolicNode, properties,
   conv_dropout = properties["conv_dropout"]
   fc_layers = properties["fc"]
   dropout = properties["dropout"]
-
   last_conv_data_length = Int(full_size / prod(pool_sizes))
 
   for i in (length(fc_layers)-1):-1:1
@@ -61,13 +59,13 @@ function _build_conv_decoder(X::mx.SymbolicNode, Y::mx.SymbolicNode, properties,
   end
   if length(filter_counts) > 0
     X = fc_layer("blow_up", X, filter_counts[end] * last_conv_data_length, act_type, conv_dropout)
-        X = mx.Reshape(X; shape=(1, last_conv_data_length, Int(filter_counts[end]), batch_size))
+        X = mx.reshape(X, (1, last_conv_data_length, Int(filter_counts[end]), batch_size))
   else
     X = fc_layer("blow_up", X, full_size, act_type, conv_dropout)
   end
 
   # Deconvolutions
-  for i in length(filter_counts):-1:2
+  for i in length(filter_counts):-1:2 # goes till 2 inclusive
     X = deconv_layer("deconv_$i", X, filter_counts[i-1], filter_lengths[i], act_type, pool_sizes[i], conv_dropout)
   end
   if length(filter_counts) > 0
@@ -76,14 +74,16 @@ function _build_conv_decoder(X::mx.SymbolicNode, Y::mx.SymbolicNode, properties,
     X = mx.Flatten(X, name=:out) # (batch_size, width, height=1)
   end
     # X = mx.FullyConnected(X, num_hidden=input_size, name=:out)
-  loss = mx.LinearRegressionOutput(X, Y, name=:softmax)
+  loss = mx.LinearRegressionOutput(X, Y, name=:loss)
   return loss, X
 end
 
 
 export autoencoder
+"""
+Parses training and validation data from *data* then calls build() method.
+"""
 function autoencoder(env::DLEnv, data; id="autoencoder", action::Symbol=:auto, train_key="train", xval_key="xval")
-
   if action == :auto
     action = decide_best_action(network(env,id))
     info(env, 2, "$id: auto-selected action is $action")
@@ -94,7 +94,8 @@ function autoencoder(env::DLEnv, data; id="autoencoder", action::Symbol=:auto, t
   if action != :load
     training_waveforms = waveforms(data[:set=>train_key])
     xval_data = data[:set=>xval_key]
-
+    #training_waveforms = waveforms(augment>0 ? augment_data(data[:set=>train_key], copy_n_times=augment, risetime_threshold=risetime_threshold, add_noise=true) : data[:set=>train_key])
+    #xval_data = augment>0 ? augment_data(data[:set=>xval_key], copy_n_times=augment, risetime_threshold=risetime_threshold, add_noise=true) : data[:set=>xval_key]
     if eventcount(xval_data) < n["batch_size"]
       n["batch_size"] = eventcount(xval_data)
       info("Cross validation set only has $(eventcount(xval_data)) data points. Adjusting bach size accordingly.")
@@ -108,8 +109,7 @@ function autoencoder(env::DLEnv, data; id="autoencoder", action::Symbol=:auto, t
     train_provider = nothing
     eval_provider = nothing
   end
-
-  build(n, action, train_provider, eval_provider, _build_conv_autoencoder; verbosity=get_verbosity(env))
+  build(n, action, train_provider, eval_provider, _build_conv_autoencoder; verbosity=get_verbosity(env), weight_init=false)
   return n
 end
 
@@ -132,7 +132,7 @@ function decoder(env::DLEnv, latent_data::EventCollection,
 
   full_size = sample_size(target_data)
   build(n, action, train_provider, eval_provider, (p, s) -> _build_conv_decoder(full_size, p, s);
-  verbosity=get_verbosity(env))
+  verbosity=get_verbosity(env), weight_init=false)
   return n
 end
 
@@ -157,7 +157,7 @@ function encode(events::EventLibrary, n::NetworkInfo; log=false)
             batch_range = i:min(size(all_waveforms,2),(i+pred_batch_size-1))
             batch[:, 1:length(batch_range)] = all_waveforms[:,batch_range]
             provider = mx.ArrayDataProvider(:data => batch, batch_size=batch_size)
-            push!(all_encoded, mx.predict(model, provider)[:,1:length(batch_range)])
+            push!(all_encoded, mx.predict(model, provider, verbosity=0)[:,1:length(batch_range)])
         end
         result.waveforms = hcat(all_encoded...)
   else
@@ -176,10 +176,10 @@ end
 export decode
 function decode(compact::EventLibrary, n::NetworkInfo, pulse_size; log=false)
   log && info("$(n.name): decoding '$(compact[:name])'...")
-
   X = mx.Variable(:data)
   Y = mx.Variable(:label) # not needed because no training
   loss, X = _build_conv_decoder(X, Y, n.config, pulse_size)
+
   model = subnetwork(n.model, mx.FeedForward(loss, context=n.context))
 
   batch_size=n["batch_size"]
@@ -190,7 +190,7 @@ function decode(compact::EventLibrary, n::NetworkInfo, pulse_size; log=false)
   end
 
   provider = mx.ArrayDataProvider(:data => waveforms, batch_size=batch_size)
-  transformed = mx.predict(model, provider)
+  transformed = mx.predict(model, provider, verbosity=0)
 
   result = copy(compact)
   result.waveforms = transformed
@@ -219,7 +219,7 @@ export encode_decode
 function encode_decode(events::EventLibrary, n::NetworkInfo)
   batch_size=n["batch_size"]
   provider = padded_array_provider(:data, waveforms(events), batch_size)
-  reconst = mx.predict(n.model, provider)
+  reconst = mx.predict(n.model, provider, verbosity=0)
     if eventcount(events) < batch_size
         reconst = reconst[:,1:eventcount(events)]
     end

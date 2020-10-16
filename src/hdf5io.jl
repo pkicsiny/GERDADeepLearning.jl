@@ -6,9 +6,9 @@ type EventFormatException <: Exception
   msg::String
 end
 
-
-function create_libroot(h5file, libname)
-  libroot = g_create(h5file, libname)
+export create_libroot
+function create_libroot(h5file, h5_libname) # highest group of h5 file
+  libroot = g_create(h5file, h5_libname)
   attrs(libroot)["type"] = "EventLibrary"
   attrs(libroot)["version"] = "1.0"
   return libroot
@@ -18,13 +18,13 @@ end
 The keylist must be iterable and implement listname.
 The entries must support the string method.
 """
-function create_extendible_hdf5_files(output_dir, keylists, detector_names, sample_size, chunk_size, label_keys)
+function create_extendible_hdf5_files(output_dir, keylists, detector_names, sample_size, chunk_size, label_keys) #creates .h5 files in output_dir
 
-  sample_size = Int64(sample_size) # Prevents HDF5 error
-  chunk_size = Int64(chunk_size)
-
+  sample_size = Int64(sample_size) # Prevents HDF5 error 1000
+  chunk_size = Int64(chunk_size) #256
+  #file creation for each detector
   h5files = [h5open(joinpath(output_dir, "$dname.h5"), "w") for dname in detector_names]
-
+  #build file structure (groups, dicts)
   label_arrays = Dict[]
 
   for (i,h5file) in enumerate(h5files)
@@ -35,7 +35,7 @@ function create_extendible_hdf5_files(output_dir, keylists, detector_names, samp
     waveforms = d_create(libroot, "waveforms", Float32, ((sample_size,chunk_size), (sample_size,-1)), "chunk", (sample_size,chunk_size)) # requires Int64 sizes
     set_dims!(waveforms, (sample_size, 0))
     detector_labels[:waveforms] = waveforms
-
+#labels group of events
     labelsg = g_create(libroot, "labels")
     push!(label_arrays, detector_labels)
     for (label_key, dtype) in label_keys
@@ -43,17 +43,17 @@ function create_extendible_hdf5_files(output_dir, keylists, detector_names, samp
       set_dims!(labeld, (0,))
       detector_labels[label_key] = labeld
     end
-
+ #properties group of det
     properties = g_create(libroot, "properties")
     attrs(properties)["name"] = detector_names[i]
     attrs(properties)["sampling_rate"] = 100e6
     attrs(properties)["detector_id"] = i
     attrs(properties)["detector_name"] = detector_names[i]
     attrs(properties)["waveform_type"] = "raw"
-    for (i,keylist) in enumerate(keylists)
+    for (i,keylist) in enumerate(keylists) #txt file and the datafile names in it
       klg = g_create(properties, "Keylist$i")
-      attrs(klg)["name"] = listname(keylist)
-      attrs(klg)["entries"] = [string(key) for key in keylist]
+      attrs(klg)["name"] = listname(keylist) #.txt name
+      attrs(klg)["entries"] = [string(key) for key in keylist] # datafile names (gerda-run0089-...)
     end
   end
 
@@ -61,23 +61,30 @@ function create_extendible_hdf5_files(output_dir, keylists, detector_names, samp
 end
 
 
-function lazy_read_all(dir::AbstractString)
-  files = readdir(dir)
-  files = filter(f->endswith(f, ".h5"), files)
-  names = [file[1:end-3] for file in files]
+function lazy_read_all(dir::AbstractString; h5_libname::String="") #reads .h5 files from directory
+  files = readdir(dir) #.h5 files in eg "raw" folder
+  files = filter(f->endswith(f, ".h5"), files) #hdf5 files in dir
+  names = [file[1:end-3]*h5_libname for file in files]
   libs = [lazy_read_library(joinpath(dir, files[i]), names[i]) for i in 1:length(files)]
-  result = DLData(libs)
+  result = DLData(libs) #assembly of event libs
   result.dir = dir
   return result
 end
 
-function lazy_read_library(h5_filepath, libname)
-  init = lib -> _initialize_from_file(lib, h5_filepath, libname)
-  lib =  EventLibrary(init)
+export lazy_read_library
+"""
+Loads one .h5 file into an EventLibrary.
+h5_filepath: path of form /home/.../detname.h5
+h5_libname: detector name like 'ANG1'
+"""
+function lazy_read_library(h5_filepath, h5_libname) #generate julia e.l. by reading from hdf5 file
+  init = lib -> _initialize_from_file(lib, h5_filepath, h5_libname)
+  lib =  EventLibrary(init) #the julia event library of the data
 
   ifile = h5open(h5_filepath, "r")
-  libroot = ifile[libname]
-
+  libroot = ifile[h5_libname] #the group of the h5 file
+  
+  #checks attributes of h5file (he defined this way so they are the same always)
   if read(attrs(libroot)["type"]) != "EventLibrary"
     throw(EventFormatException("Not a valid EventLibrary: $(read(attrs(libroot)["type"]))"))
   end
@@ -86,33 +93,33 @@ function lazy_read_library(h5_filepath, libname)
   end
 
   # Read properties
-  props = libroot["properties"]
-  for key in names(attrs(props))
-    value = read(attrs(props)[key])
-    lib.prop[Symbol(key)] = value
+  props = libroot["properties"] #subgroup, group in libroot
+  for key in names(attrs(props)) #attribute name is the key
+    value = read(attrs(props)[key]) #attribute value
+    lib.prop[Symbol(key)] = value #fills up with det. properties (name, id)
   end
-  lib.prop[:eventcount] = size(libroot["waveforms"], 2)
+  lib.prop[:eventcount] = size(libroot["waveforms"], 2) #new prop with size of no. samples
   # TODO keylists
 
   # Initialize label names
-  labels = libroot["labels"]
-  for key in names(labels)
-    lib.labels[Symbol(key)] = zeros(Float32, 0)
+  labels = libroot["labels"] #subgroup of group
+  for key in names(labels) #key is a dict name of group
+    lib.labels[Symbol(key)] = zeros(Float32, 0) #makes :key from "key" and initializes as empty
   end
 
   close(ifile)
 
-  return lib
+  return lib #julia event library with structure and props and empty label values
 end
 
-function _initialize_from_file(lib::EventLibrary, h5_filepath, libname)
+function _initialize_from_file(lib::EventLibrary, h5_filepath, h5_libname)
+  #opens hdf5 file and decodes waveforms and labels
   h5open(h5_filepath, "r") do ifile
-    libroot = ifile[libname]
-
+    libroot = ifile[h5_libname]
     # Read waveforms
     try
       lib.waveforms = read(libroot["waveforms"])
-    catch err
+    catch err # also catches memory errors
       info("Illegal waveform data for lib $(lib[:name]).")
       lib.waveforms = zeros(Float32, 1, 0)
     end
@@ -129,6 +136,9 @@ end
 
 export write_all
 function write_all_sequentially(data::DLData, dir::AbstractString, uninitialize::Bool)
+  """
+  Writes data into h5 files.
+  """
   isdir(dir) || mkdir(dir)
   for lib in data
     filepath = joinpath(dir, lib[:name]*".h5")
@@ -151,7 +161,7 @@ end
 export write_lib
 function write_lib(lib::EventLibrary, filepath::AbstractString, uninitialize::Bool)
   h5open(filepath, "w") do h5file
-    libroot = create_libroot(h5file, lib[:name])
+    libroot = create_libroot(h5file, lib[:name]) #xy_preprocessed_all or xy
 
     write(libroot, "waveforms", waveforms(lib))
 
@@ -177,7 +187,7 @@ function write_lib(lib::EventLibrary, filepath::AbstractString, uninitialize::Bo
 end
 
 
-
+# convert dict["key"] format to dict[:key] format
 function _str_to_sym_dict(dict)
   result = Dict{Symbol, Any}()
   for (key,value) in dict
@@ -192,7 +202,7 @@ function segh5_to_hdf5(formattype::AbstractString, keylists::Vector{Vector{Abstr
   all_files = vcat(keylists...)
 
   sample_size = _segh5_get_waveform_length(all_files[1])
-  verbosity > 2 && info("Determined number of samples per waveform = $sample_size.")
+  verbosity > 1 && info("Determined number of samples per waveform = $sample_size.")
 
   label_keys = [:keylist=>Int32, :filenum=>Int32, :E=>Float32, :E1=>Float32, :E2=>Float32, :E3=>Float32, :E4=>Float32]
 

@@ -2,10 +2,10 @@
 
 
 export FileKey
-immutable FileKey
+immutable FileKey #datafile name
   run::Integer
   event_type::Symbol # :cal, :phy
-  fileid::AbstractString
+  fileid::AbstractString 
   id::AbstractString
 
   function FileKey(id::AbstractString)
@@ -26,24 +26,24 @@ end
 
 export KeyList
 immutable KeyList
-  name::String
-  entries::Vector{FileKey}
+  name::String #.txt name
+  entries::Vector{FileKey} #datafiles
 end
 
-export path
+export path #returns path of actual root datafile
 function path(base_dir::AbstractString, key::FileKey, tier)
   subfolder = (tier == :tier1 || tier == :tier2 || tier == :tierW) ? "ged" : "all"
   str_tier = string(tier)
-  str_run = "run"*lpad(key.run, 4, 0)
+  str_run = "run"*lpad(key.run, 4, 0) # pad e.g. 89 to 0089
   str_event_type = string(key.event_type)
   filename = "gerda-$str_run-$(key.fileid)-$str_event_type-$subfolder-$str_tier.root"
   return joinpath(base_dir, str_tier, subfolder, str_event_type, str_run, filename)
 end
 
-export parse_keylist
-function parse_keylist(keylist_file::AbstractString, name::String)
-  entries = [FileKey(id) for id in open(readlines, keylist_file)]
-  return KeyList(name, entries)
+export parse_keylist #parses whats in the txt
+function parse_keylist(keylist_file::AbstractString, name::String) #path to file and filename
+  entries = [FileKey(id) for id in open(readlines, keylist_file)] # gets actual data file names
+  return KeyList(name, entries) # a .txt file with its entries
 end
 
 export name
@@ -104,4 +104,4 @@ Coax_GERDA_II() = ["ANG1", "ANG2", "ANG3", "ANG4", "ANG5", "RG1", "RG2"]
 
 Natural_GERDA_II() = ["GTF112", "GTF32", "GTF45_2"]
 
-Used_GERDA_II() = ["GD91A", "GD35B", "GD02B", "GD00B", "GD61A", "GD89B", "GD91C", "GD02A", "GD32B", "GD32A", "GD32C", "GD89C", "GD61C", "GD76B", "GD00C", "GD35C", "GD76C", "GD89D", "GD00D", "GD79C", "GD35A", "GD61B", "GD00A", "GD02C", "GD79B", "GD91D", "GD32D", "GD89A", "ANG1", "ANG2", "ANG3", "ANG4", "ANG5", "RG1", "RG2"]
+Used_GERDA_II() = ["GD91A", "GD35B", "GD02B", "GD00B", "GD61A", "ANG5", "RG1", "ANG3", "GD02A", "GD32B", "GD32A", "GD32C", "GD89C", "GD61C", "GD76B", "GD00C", "GD35C", "GD76C", "GD89D", "GD00D", "GD79C", "GD35A", "GD91B", "GD61B", "ANG2", "RG2", "ANG4", "GD00A", "GD02C", "GD79B", "GD91D", "GD32D", "GD89A", "ANG1"]

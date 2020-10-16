@@ -4,7 +4,7 @@ using MXNet
 
 import StatsBase: predict
 
-
+export _build_dnn_classifier
 function _build_dnn_classifier(properties, input_size)
   batch_size = properties["batch_size"]
   act_type = properties["activation"]
@@ -20,7 +20,7 @@ function _build_dnn_classifier(properties, input_size)
   X = mx.FullyConnected(X, num_hidden=1, name=:out)
 
   # Available outputs: SoftmaxOutput, LinearRegressionOutput, LogisticRegressionOutput, MAERegressionOutput, SVMOutput
-  loss = mx.LogisticRegressionOutput(X, Y, name=:softmax)
+  loss = mx.LogisticRegressionOutput(X, Y, name=:loss)
   return loss, X
 end
 
@@ -29,7 +29,7 @@ end
 export dnn_classifier
 function dnn_classifier(env::DLEnv, data;
   id="dnn-classifier", action::Symbol=:auto, label_key=:SSE,
-  train_key="train", xval_key="xval", evaluate=["test"])
+  train_key="train", xval_key="xval", evaluate=["test"], label_function=label_surface_bulk!)
 
   if action == :auto
     action = decide_best_action(network(env,id))
@@ -39,24 +39,33 @@ function dnn_classifier(env::DLEnv, data;
   n = network(env, id)
 
   if action != :load
+
     training_data = flatten(data[:set=>train_key])
+
     xval_data = flatten(data[:set=>xval_key])
 
     # Preprocessing
     if !haskey(training_data, label_key)
       info(env, 2, "$id: No labels found on training data -> Using default energy labels from label_energy_peaks()")
-      label_energy_peaks(training_data, label_key)
-      label_energy_peaks(xval_data, label_key)
+#full of -1 when no counts at label energies
+      label_function(training_data, label_key)
+      label_function(xval_data, label_key)
     end
+
+     
     if length(find(x->x==-1, training_data[label_key])) > 0
       info(env, 2, "$id: Removing unlabeled events and equalizing class counts.")
-      training_data, indices = equalize_counts_by_label(training_data, label_key)
-      xval_data, indices = equalize_counts_by_label(xval_data, label_key)
+      training_data, indices = equalize_counts_by_label(training_data, label_function, label_key)
+      xval_data, indices = equalize_counts_by_label(xval_data, label_function, label_key)
+
+      println("training data size ",size(training_data.waveforms))
+      println("validation data size ",size(xval_data.waveforms))
     end
-
-
+    
+    println("Batch size originally: ",n["batch_size"])   
     if eventcount(xval_data) < n["batch_size"]
       n["batch_size"] = eventcount(xval_data)
+      println("Batch size trimmed to size of xval data: ",n["batch_size"])
       info("Cross validation set only has $(eventcount(xval_data)) data points. Adjusting bach size accordingly.")
     end
 
@@ -77,7 +86,7 @@ function dnn_classifier(env::DLEnv, data;
       end
     end
 
-  build(n, action, train_provider, xval_provider, _build_dnn_classifier)
+  build(n, action, train_provider, xval_provider, _build_dnn_classifier, verbosity=get_verbosity(env))
 
   for eval_set_name in evaluate
     for lib in data[:set=>eval_set_name]
@@ -85,14 +94,17 @@ function dnn_classifier(env::DLEnv, data;
     end
   end
 
+#net model and training data sizes
   return n
 end
 
 export predict
 function predict(data::EventLibrary, n::NetworkInfo, psd_name=:psd)
   if eventcount(data) > 0
+    
     provider = mx.ArrayDataProvider(:data => waveforms(data), batch_size=n["batch_size"])
-    predictions = mx.predict(n.model, provider)
+	
+    predictions = mx.predict(n.model, provider, verbosity=0)
     data.labels[psd_name] = predictions[1,:]
   else
     data.labels[psd_name] = zeros(Float32, 0)

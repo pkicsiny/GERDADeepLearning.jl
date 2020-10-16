@@ -243,15 +243,18 @@ function plot_waveform_comparisons(env::DLEnv, libs::EventLibrary...; count=20, 
   return libs
 end
 
-
+export visualize_1D_convolution
 function visualize_1D_convolution(model, name, filename)
+  pyplot_config()
+
+  colors = [:blue :red :green :purple]
   for param in model.arg_params
     if(param[1] == name)
       filters = copy(param[2])[1,:,1,:] # One column per filter
       filters = vcat(filters, transpose(filters[end,:]))
-      plot(filters, line=(2, :steppost))
+      plot(filters, line=(2, :steppost), label="", color=colors)
       title!("Learned convolutional filters in first layer")
-      xaxis!("Delta time")
+      xaxis!("Sample")
       yaxis!("Conv. filter value")
       savefig(filename)
     end
@@ -475,7 +478,7 @@ function plot_classifier_histogram(dir, events::EventLibrary, label_key, psd_key
     histogram!(psd_MSE, bins=bins, label="Bi FEP ($(length(psd_MSE)) events)", fillalpha=0.7, legendfont=diagram_font, linewidth=0)
     xaxis!("Classifier response", diagram_font)
     yaxis!("Event count", diagram_font)
-    savefig(joinpath(dir,"Class distribution $(events[:name]).png"))
+    savefig(joinpath(dir,"Class_distribution_$(events[:name]).png"))
   end
 
     # Total distribution
@@ -509,10 +512,10 @@ function plot_classifier_histogram(dir, events::EventLibrary, label_key, psd_key
       savefig(joinpath(dir, "Distribution over time $(events[:name]) millis.png"))
     end
 
-  if haskey(events, :multiplicity)
-    histogram2d(convert(Array{Float64},events.labels[:multiplicity]), convert(Array{Float64},events.labels[psd_key]))
-    savefig(joinpath(dir, "Multiplicity correlation $(events[:name]).png"))
-  end
+#  if haskey(events, :multiplicity)
+#    histogram2d(convert(Array{Float64},events.labels[:multiplicity]), convert(Array{Float64},events.labels[psd_key]))
+#    savefig(joinpath(dir, "Multiplicity correlation $(events[:name]).png"))
+#  end
 
   return bins
 end

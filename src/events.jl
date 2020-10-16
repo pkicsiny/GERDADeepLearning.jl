@@ -5,20 +5,20 @@ import Base: filter, length, getindex, haskey, copy, string, print, deepcopy
 
 
 export EventCollection
-@compat abstract type EventCollection
+@compat abstract type EventCollection #parent type
 end
 
 type NoSuchEventException <: Exception
 end
 
 export EventLibrary
-type EventLibrary <: EventCollection
+type EventLibrary <: EventCollection #derived type
   # EventLibraries can be lazily initialized.
   # Possible initializers: load from file, filter by label
   initialization_function::Union{Function,Void}
 
   waveforms::Array{Float32, 2}
-  labels::Dict{Symbol,Vector} # same length as waveforms
+  labels::Dict{Symbol,Vector}
   prop::Dict{Symbol,Any}
 
   EventLibrary(init::Function) = new(init, zeros(Float32, 0,0), Dict{Symbol,Vector}(), Dict{Symbol,Any}())
@@ -30,7 +30,9 @@ end
 
 export DLData
 type DLData <: EventCollection
+#vector of data of each dataset of detectors
   entries :: Vector{EventLibrary}
+#path of files
   dir :: Union{AbstractString,Void}
 
   function DLData(entries::Vector{EventLibrary})
@@ -55,15 +57,21 @@ Base.cat(libs::EventLibrary...) = cat([lib for lib in libs])
 
 
 function _set_shallow(lib::EventLibrary, from::EventLibrary)
+#the init func
   lib.initialization_function = from.initialization_function
+#the traces
   lib.waveforms = from.waveforms
+#the keys
   lib.labels = from.labels
+#properties
   lib.prop = from.prop
 end
 
+#generic function, true or false
+export is_initialized
 is_initialized(lib::EventLibrary) = lib.initialization_function == nothing
 
-export initialize
+export initialize #lib is one dataset of one detector
 function initialize(lib::EventLibrary)
   if lib.initialization_function != nothing
     lib.initialization_function(lib)
@@ -79,6 +87,7 @@ function dispose(lib::EventLibrary)
 end
 dispose(data::DLData) = for lib in data dispose(lib) end
 
+#initialize all datasets
 function initialize(data::DLData)
   for lib in data
     initialize(lib)
@@ -112,7 +121,7 @@ function flatten(data::DLData)
 end
 flatten(lib::EventLibrary) = lib
 
-export waveforms
+export waveforms # makes waveforms available by initializing
 waveforms(lib::EventLibrary) = initialize(lib).waveforms
 waveforms(data::DLData) = waveforms(flatten(data))
 
@@ -161,6 +170,9 @@ function filter(lib::EventLibrary, predicate_key::Symbol, predicate::Function)
 end
 
 function filter(data::DLData, predicate_key::Symbol, predicate::Function)
+  """
+  Filters DLData object by predicate_key where predicate function holds.
+  """
   if hasproperty(data, predicate_key)
     # Filter list of datasets
     filtered_indices = find(lib -> predicate(lib.prop[predicate_key]), data.entries)
@@ -179,9 +191,11 @@ Base.filter!(lib::EventCollection, key::Symbol, value::Union{AbstractString,Numb
 Base.filter!{T<:Union{AbstractString,Number}}(lib::EventCollection, key::Symbol, values::Vector{T}) = filter!(lib, key, x -> x in values)
 
 function Base.filter!(lib::EventLibrary, predicate_key::Symbol, predicate::Function)
-    # First check whether it's a property
+   # First check whether it's a property i.e. per detector feature
+
   if haskey(lib.prop, predicate_key)
-        propval = lib.prop[predicate_key]
+        propval = lib.prop[predicate_key] #the key
+
         if !predicate(propval)
             lib.waveforms = zeros(Float32, 0, 0)
             lib.initialization_function = nothing
@@ -191,20 +205,24 @@ function Base.filter!(lib::EventLibrary, predicate_key::Symbol, predicate::Funct
         end
         return lib
     end
-
-    # Else it has to be a label
-  if is_initialized(lib)
+  
+    # Else it has to be a label, needs init
+  if is_initialized(lib) # if already initialized i.e. per event data is loaded
+    #println("filter!() Already initialized $(lib[:name]), $(predicate_key)")
     indices = find(predicate, lib.labels[predicate_key])
     lib.waveforms = lib.waveforms[:,indices]
+   
     for label in keys(lib.labels)
-      lib.labels[label] = lib.labels[label][indices]
+      lib.labels[label] = lib.labels[label][indices]#filter other per event labels
     end
   else
+
     prev_initialization = lib.initialization_function
-    lib.initialization_function = lib2 -> begin
-      lib2.initialization_function = nothing
-      prev_initialization(lib2)
-      filter!(lib2, predicate_key, predicate)
+    #println("filter!() Not initialized $(lib[:name]), $(predicate_key), setting init func")
+    lib.initialization_function = lib2 -> begin #function will be callable as lib.i_f(lib2)
+    	lib2.initialization_function = nothing
+    	prev_initialization(lib2)
+    	filter!(lib2, predicate_key, predicate)
     end
   end
   delete!(lib.prop, :eventcount)
@@ -212,14 +230,17 @@ function Base.filter!(lib::EventLibrary, predicate_key::Symbol, predicate::Funct
 end
 
 function Base.filter!(data::DLData, predicate_key::Symbol, predicate::Function)
-  if hasproperty(data, predicate_key)
+  #println("Entered filter!() DLData with key: $(predicate_key)")
+  if hasproperty(data, predicate_key) # filter DlData
     # Filter list of datasets
-    filtered_indices = find(lib -> predicate(lib.prop[predicate_key]), data.entries)
+    println(predicate_key)
+    filtered_indices = find(lib -> predicate(lib.prop[predicate_key]), data.entries)#find indices that fulfil filter criteria
     data.entries = data.entries[filtered_indices]
     return data
   else
     # Filter individual datasets
     for lib in data
+      
       filter!(lib, predicate_key, predicate)
     end
   end
@@ -287,6 +308,7 @@ function getindex(data::DLData, key::Symbol)
     return flatten(data)[key]
 end
 
+
 function getindex(events::EventLibrary, key::AbstractString)
   return getindex(events, Symbol(key))
 end
@@ -315,10 +337,13 @@ end
 export eventcount
 function eventcount(events::EventLibrary)
     if size(events.waveforms, 2) > 0
+
         return size(events.waveforms, 2)
-    elseif haskey(events, :eventcount)
+    elseif haskey(events, :eventcount) 
+
         return events[:eventcount]
     else
+
         return size(initialize(events).waveforms, 2)
     end
 end
@@ -329,12 +354,13 @@ function eventcount(data::DLData)
     return sum([eventcount(lib) for lib in data.entries])
 end
 
+
 Base.haskey(events::EventLibrary, key::Symbol) = haskey(events.labels, key) || haskey(events.prop, key)
 Base.haskey(data::DLData, key::Symbol) = length(data) > 0 && haskey(data.entries[1])
 
 export hasproperty
 hasproperty(events::EventLibrary, key::Symbol) = haskey(events.prop, key)
-hasproperty(data::DLData, key::Symbol) = length(data) > 0 && hasproperty(data.entries[1], key)
+hasproperty(data::DLData, key::Symbol) = length(data) > 0 && hasproperty(data.entries[1], key) #length data is the no of datasets
 
 
 
@@ -494,7 +520,7 @@ Base.sort(data::DLData, labelkey::Symbol) = sort(flatten(data), labelkey)
 
 
 
-function Base.split(data::DLData, datasets::Dict{AbstractString,Vector{AbstractFloat}})
+function Base.split(data::DLData, datasets::Dict{AbstractString,Vector{AbstractFloat}}) #changed from abstractstring and vector{abstractfloat}
     result = DLData(EventLibrary[])
     for lib in copy(data.entries)
       split_result = split(lib, datasets)
@@ -558,18 +584,21 @@ function Base.split(lib::EventLibrary, fractions::Dict{AbstractString,Vector{Abs
 end
 
 export label_energy_peaks!
-function label_energy_peaks!(events::EventLibrary; label_key=:SSE, peaks0=[1620.7], peaks1=[1592.5], half_window=2.0)
+function label_energy_peaks!(events::EventLibrary, label_key::Symbol, peaks0=[1620.7], peaks1=[1592.5], half_window=2.0)
+#(events::EventLibrary; label_key:SSE, ... didn't work 
+#label every event according to their energy deposit
   labels = [_get_label(events[:E][i], peaks0, peaks1, half_window) for i in 1:eventcount(events)]
   events.labels[label_key] = labels
   return events
 end
-function label_energy_peaks!(data::DLData; label_key=:SSE, peaks0=[1620.7], peaks1=[1592.5], half_window=2.0)
+function label_energy_peaks!(data::DLData, label_key::Symbol, peaks0=[1620.7], peaks1=[1592.5], half_window=2.0)
     for lib in data
         label_energy_peaks!(lib; label_key=label_key, peaks0=peaks0, peaks1=peaks1, half_window=half_window)
     end
 end
 
 function _get_label(energy, peaks0, peaks1, half_window)
+#labels energy peaks, labels event if its energy is within half window range from the peak energy
   for peak0 in peaks0
     if abs(energy-peak0) <= half_window
       return 0
@@ -584,19 +613,25 @@ function _get_label(energy, peaks0, peaks1, half_window)
 end
 
 export equalize_counts_by_label
-function equalize_counts_by_label(events::EventLibrary, label_key=:SSE)
-  if !haskey(events, label_key)
-    label_energy_peaks!(events, label_key)
+function equalize_counts_by_label(events::EventLibrary, label_function, label_key=:SSE)
+  
+  if !haskey(events, label_key) #if not labeled, label now
+    # label_energy_peaks!(events, label_key)
+    label_function(events, label_key)
   end
+  
   labels = events.labels[label_key]
-  i_SSE = find(x -> x==1, labels)
-  i_MSE = find(x -> x==0, labels)
+ #search for labeled peaks
+  i_SSE = find(x -> x==1, labels) # or surface
+  i_MSE = find(x -> x==0, labels) # or bulk
+
   count = min(length(i_SSE), length(i_MSE))
-  info("Equalizing $(events[:name]) to $count counts. SSE: $(length(i_SSE)), MSE: $(length(i_MSE))")
+  info("Equalizing $(events[:name]) to $count counts. SSE/surface: $(length(i_SSE)), MSE/bulk: $(length(i_MSE))")
 
   # trim and shuffle
   used_indices = [i_SSE[1:count];i_MSE[1:count]]
   shuffled_indices = used_indices[randperm(length(used_indices))]
+#return is the smaller set of 0 or 1 labeled counts and that many elements from the other and their indices
 
   return events[shuffled_indices], shuffled_indices
 end

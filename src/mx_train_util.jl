@@ -6,25 +6,36 @@ import Base: getindex
 
 
 function fc_layer(name, X, n_hidden, act_type, pdropout)
-  fc = mx.FullyConnected(X, num_hidden=Int(n_hidden), name="$(name)")
-  act = mx.Activation(fc, act_type=act_type, name="$(name)_act")
-  return mx.Dropout(act, p=pdropout, name="$(name)_dropout")
+  X = mx.FullyConnected(X, num_hidden=Int(n_hidden), name="$(name)")
+  #X = mx.BatchNorm(X)
+  X = mx.Activation(X, act_type=act_type, name="$(name)_act")
+  return mx.Dropout(X, p=pdropout, name="$(name)_dropout")
 end
 
 function conv_layer(name, X, num_filter, filter_length, act_type, pool_size, pool_type, dropout)
-  conv = mx.Convolution(X, kernel=(1, filter_length), pad=(0, 4), num_filter=num_filter, name="$name") # 2D->3D
-  act = mx.Activation(conv, act_type=act_type, name="$(name)_act")
-  pool = mx.Pooling(act, kernel=(1, pool_size), stride=(1, pool_size), pool_type=pool_type, name="$(name)_pool") # 256->64
-  dropout = mx.Dropout(pool, p=dropout, name="$(name)_dropout")
-  return dropout
+  pad = Int(floor(0.5*(filter_length - 1)))
+  X = mx.Convolution(X, kernel=(1, filter_length), pad=(0, pad), stride=(1, 1) , num_filter=num_filter, name="$name") # 2D->3D
+  #X = mx.BatchNorm(X)
+  X = mx.Activation(X, act_type=act_type, name="$(name)_act")
+  if pool_type != nothing && pool_size != nothing
+      X = mx.Pooling(X, kernel=(1, pool_size), stride=(1, pool_size), pool_type=pool_type, name="$(name)_pool") # 256->64
+  end
+  X = mx.Dropout(X, p=dropout, name="$(name)_dropout")
+  return X
 end
 
 function deconv_layer(name, X, num_filter, filter_length, act_type, pool_size, dropout)
-  pad = Int( floor(filter_length/2) - pool_size/2 )
+  pad = max(Int( floor(filter_length/2) - pool_size/2 ),0) # 2
   if pad < 0
     throw(ArgumentError("upsampling not possible because padding is negative ($pad). Increase filter length or decrease pool size."))
+  elseif pad == 0
+    deconv_filter = 4  # minimum filter length that can be applied with this configuration
+  else
+    deconv_filter = filter_length-1
   end
-  X = mx.Deconvolution(X, kernel=(1, filter_length-1), stride=(1, pool_size), pad=(0, pad), num_filter=num_filter, name="$name")
+        
+  X = mx.Deconvolution(X, kernel=(1, deconv_filter), stride=(1, pool_size), pad=(0, pad), num_filter=num_filter, name="$name")
+  #X = mx.BatchNorm(X)
   if act_type != nothing
     X = mx.Activation(X, act_type=act_type, name="$(name)_act")
   end
@@ -32,13 +43,13 @@ function deconv_layer(name, X, num_filter, filter_length, act_type, pool_size, d
   return X
 end
 
-
-
+export PlotCallback
 type PlotCallback <: mx.AbstractEpochCallback
     graphs::Dict{Symbol, Array{Float32,1}}
 
     PlotCallback() = new(Dict{Symbol, Array{Float32,1}}())
 end
+
 
 function (cb::PlotCallback){T<:Real}(model :: Any, state :: mx.OptimizationState, metric :: Vector{Tuple{Base.Symbol, T}})
   for index in 1:length(metric)
@@ -53,7 +64,7 @@ end
 
 
 
-
+export calculate_parameters
 function calculate_parameters(model, filepath)
   file = open(filepath, "w")
   total_parameter_count = 0
@@ -80,56 +91,6 @@ function calculate_parameters(model, filepath)
    end
  end
 
-# function exists_device(ctx::mx.Context)
-#  try
-#    mx.ones(Float32, (1,1), ctx)
-#    return true
-#  catch err
-#    return false
-#  end
-# end
-#
-#
-#  best_device_cache = nothing
-#
-# export best_device
-#  function best_device()
-#    global best_device_cache
-#    if best_device_cache == nothing
-#      gpus = list_xpus(mx.gpu)
-#      if length(gpus) > 0
-#        best_device_cache = gpus
-#        info("$(length(gpus)) GPUs found.")
-#      else
-#        best_device_cache = mx.cpu()
-#        info("No GPUs available, fallback to single CPU.")
-#      end
-#    end
-#    return best_device_cache
-#  end
-#
-# export use_gpu
-# function use_gpu(id)
-#   global best_device_cache
-#   if exists_device(mx.gpu(id))
-#     best_device_cache = mx.gpu(id)
-#   else
-#     info("Could not access GPU $id, fallback to CPU")
-#     best_device_cache = mx.cpu()
-#   end
-# end
-#
-# export list_xpus
-# function list_xpus(xpu=mx.gpu)
-#   result = mx.Context[]
-#   while exists_device(xpu(length(result))) && length(result) < 8
-#     push!(result, xpu(length(result)))
-#   end
-#   return result
-# end
-
-
-
  type NetworkInfo
    name::String
    dir::AbstractString
@@ -139,16 +100,17 @@ function calculate_parameters(model, filepath)
    epoch::Integer # the current state of the model, initialized to 0.
    training_curve::Vector{Float64} # MSE, created during training
    xval_curve::Vector{Float64} # MSE, created on demand
+#   second_training_curve::Vector{Float64}
 
    NetworkInfo(name::String, dir::AbstractString, config::Dict, context) =
       new(name, dir, config, context, nothing, 0, Float64[], Float64[])
  end
 
-
 Base.getindex(n::NetworkInfo, key::AbstractString) = n.config[key]
 Base.setindex!(n::NetworkInfo, value, key::AbstractString) = n.config[key] = value
 
-function save_compatible_heckpoint(sym :: mx.SymbolicNode, arg_params :: Dict{Base.Symbol, mx.NDArray}, aux_params :: Dict{Base.Symbol, mx.NDArray}, prefix :: AbstractString, epoch :: Int)
+export save_compatible_checkpoint
+function save_compatible_checkpoint(sym :: mx.SymbolicNode, arg_params :: Dict{Base.Symbol, mx.NDArray}, aux_params :: Dict{Base.Symbol, mx.NDArray}, prefix :: AbstractString, epoch :: Int)
   if epoch <= 1
     mx.save("$prefix-symbol.json", sym)
   end
@@ -182,10 +144,10 @@ function mx_create_kvstore(kv_type :: Base.Symbol, num_device :: Int, arg_params
   return (kv, update_on_kvstore)
 end
 
-
+export train
 function train(n::NetworkInfo,
       train_provider, eval_provider;
-      verbosity=2)
+      weight_init=true, verbosity=3)
   learning_rate = n["learning_rate"]
   epochs = n["epochs"]
   optimizer_name = n["optimizer"]
@@ -197,33 +159,17 @@ function train(n::NetworkInfo,
 
   training_curve = PlotCallback()
   eval_curve = Float64[]
+  #second_training_curve = Float64[]
 
   metric = mx.MSE()
 
-  if optimizer_name == "SGD"
-    optimizer = mx.SGD(lr=learning_rate, momentum=n["momentum"])
-  elseif optimizer_name == "ADAM"
-    optimizer = mx.ADAM(lr=learning_rate)
-  elseif optimizer_name == "None"
-    optimizer = mx.SGD(lr=1e-9)
-  end
-  # optimizer = mx.SGD(lr=learning_rate, momentum=0.9)
+  optimizer = set_optimizer(optimizer_name, learning_rate, gamma=0.9)
 
   # Manual initialization
-  if !isdefined(n.model, :arg_params)
+  if !isdefined(n.model, :arg_params)&&weight_init
+    info("Weight initialization.")
     mx.init_model(n.model, mx.UniformInitializer(0.1); overwrite=false, [mx.provide_data(train_provider)..., mx.provide_label(train_provider)...]...)
   end
-
-  verbosity >= 2 && info("$(train_provider.sample_count) data points, $(get_total_parameter_count(n.model)) learnable parameters, dropout=$(n["dropout"]), batch size $(train_provider.batch_size), using $optimizer_name with learning rate $learning_rate\u1b[K")
-  verbosity >= 2 && info("Starting training on $(n.model.ctx) (from $(n.epoch+1) to $epochs)... \u1b[K")
-  verbosity >= 3 && info("Untrained MSE: $(eval(n.model, eval_provider, mx.MSE())[1][2])\u1b[K")
-  flush(STDOUT)
-
-  # for arg_param in n.model.arg_params
-  #   print("$(arg_param[1]): ")
-  #   println(copy(arg_param[2])[1:min(8, length(arg_param[2]))])
-  # end
-  # kvstore, update_on_kvstore = mx_create_kvstore(:device, length(n.model.ctx), n.model.arg_params)
 
   # Train each step manually
   for epoch in (n.epoch+1) : epochs
@@ -233,15 +179,15 @@ function train(n::NetworkInfo,
            callbacks=[training_curve],
            verbosity=0,
            kvstore=:device)
-    save_compatible_heckpoint(n.model.arch, n.model.arg_params, n.model.aux_params, joinpath(n.dir,n.name), epoch)
-
-    eval_mse = eval(n.model, eval_provider, mx.MSE())[1][2]
+    save_compatible_checkpoint(n.model.arch, n.model.arg_params, n.model.aux_params, joinpath(n.dir,n.name), epoch)
+# get validation metric
+    eval_mse = eval_pred(n.model, eval_provider, mx.MSE())[1][2]
     push!(eval_curve, eval_mse)
+    #train_mse = eval_pred(n.model, train_provider, mx.MSE())[1][2]
+    #push!(second_training_curve, train_mse)
     verbosity >= 3 && info("Epoch $epoch / $epochs: MSE = $eval_mse.")
     verbosity >= 3 && flush(STDOUT)
   end
-
-  # mx.fit(n.model, optimizer, train_provider, n_epoch=epochs, eval_metric=metric, callbacks=[training_curve], kvstore=:device) # TODO
 
   n.epoch = epochs
 
@@ -249,6 +195,7 @@ function train(n::NetworkInfo,
 
   append!(n.training_curve, training_curve.graphs[:MSE])
   append!(n.xval_curve, eval_curve)
+  #append!(n.second_training_curve, second_training_curve)
   writedlm(joinpath(n.dir,n.name*"-MSE-train.txt"), n.training_curve)
   writedlm(joinpath(n.dir,n.name*"-MSE-xval.txt"), n.xval_curve)
 end
@@ -257,7 +204,7 @@ end
 export build
 function build(n::NetworkInfo, method::Symbol,
     train_provider, eval_provider, build_function;
-    verbosity=2
+    verbosity=2, weight_init=true
   )
   target_epoch = n["epochs"]
   slim = n["slim"]
@@ -273,8 +220,8 @@ function build(n::NetworkInfo, method::Symbol,
   if method == :train
     loss, net = build_function(n.config, size(train_provider.data_arrays[1],1))
     n.model = mx.FeedForward(loss, context=n.context)
-    train(n, train_provider, eval_provider; verbosity=verbosity)
-    load_network(n, target_epoch)
+    train(n, train_provider, eval_provider; verbosity=verbosity, weight_init=weight_init)
+    load_network(n, target_epoch; pick_best=true)
   elseif method == :load
     load_network(n, target_epoch)
   elseif method == :refine
@@ -311,8 +258,8 @@ function padded_array_provider(key, data::Matrix{Float32}, batch_size)
   return mx.ArrayDataProvider(key => plot_waveforms_padded, batch_size=batch_size)
 end
 
-
-function eval(model, provider::mx.ArrayDataProvider, metric::mx.AbstractEvalMetric)
+export eval_pred
+function eval_pred(model, provider::mx.ArrayDataProvider, metric::mx.AbstractEvalMetric)
   prediction = mx.predict(model, provider; verbosity=0)
   data = provider.label_arrays[1]
   mx.reset!(metric)
@@ -326,7 +273,8 @@ end
 
 
 export load_network
- function load_network(n::NetworkInfo, max_epoch; output_name="softmax", delete_unneeded_arguments=true, pick_best=true)
+ function load_network(n::NetworkInfo, max_epoch; output_name="loss", delete_unneeded_arguments=true, pick_best=true)
+   
    if max_epoch < 0
      max_epoch = last_epoch(n.dir, n.name)
    end
@@ -346,7 +294,7 @@ export load_network
    return n
  end
 
- function load_network_checkpoint(n::NetworkInfo, epoch; output_name="softmax", delete_unneeded_arguments=true)
+ function load_network_checkpoint(n::NetworkInfo, epoch; output_name="loss", delete_unneeded_arguments=true)
    sym, arg_params, aux_params = mx.load_checkpoint(joinpath(n.dir, n.name), epoch)
    n.model = subnetwork(sym, arg_params, aux_params, output_name, delete_unneeded_arguments, n.context)
    n.epoch = epoch
@@ -372,6 +320,7 @@ export load_network
    return model
  end
 
+export subnetwork
  function subnetwork(network::mx.FeedForward, subnetwork::mx.FeedForward)
    subnetwork.arg_params = copy(network.arg_params)
    subnetwork.aux_params = copy(network.aux_params)
@@ -386,6 +335,7 @@ export load_network
    return subnetwork
  end
 
+export last_epoch
  function last_epoch(dir, prefix; start=1)
    i = start
    if !isfile("$dir/$prefix-$(lpad(i,4,0)).params")

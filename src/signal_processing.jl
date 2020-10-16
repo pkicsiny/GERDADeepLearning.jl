@@ -2,10 +2,12 @@
 
 using DSP, MultiThreadingTools
 
-
+# getdata -> preprocess calls it for data of one det
 export preprocess_transform
 function preprocess_transform(env::DLEnv, lib::EventLibrary, steps::Vector{String}; copyf=deepcopy)
-  initialize(lib)
+  #lib contains the event waveforms
+  initialize(lib) # makes waveforms available
+
   result = copyf(lib)
   setname!(result, lib[:name]*"_preprocessed")
   put_label!(result, :FailedPreprocessing, zeros(Float32, eventcount(lib)))
@@ -13,8 +15,11 @@ function preprocess_transform(env::DLEnv, lib::EventLibrary, steps::Vector{Strin
 
   # perform the steps
   for (i,step) in enumerate(steps)
+	
     info(env, 3, "Preprocesing $step on $(eventcount(result)) events...")
+#make them a function
     pfunction = eval(parse(step))
+#actual preprocessing, by calling the pp functions
     result = pfunction(result)
   end
 
@@ -27,7 +32,7 @@ function preprocess_transform(env::DLEnv, lib::EventLibrary, steps::Vector{Strin
 end
 
 
-export charge_pulses
+export charge_pulses # flips the signal
 function charge_pulses(events::EventLibrary; create_new=true)
   if events[:waveform_type] == "charge"
     return events
@@ -73,12 +78,12 @@ function raw_to_charge(events::EventLibrary)
   if events[:waveform_type] != "raw"
     throw(ArgumentError("EventLibrary must contain pulses of type raw"))
   end
-  events.waveforms = - events.waveforms
+  events.waveforms = - events.waveforms # flip
   events.prop[:waveform_type] = "charge"
   return events
 end
 
-
+# tier 1 to 2 preproc steps
 export baseline
 function baseline(events::EventLibrary)
   events = charge_pulses(events; create_new=false)
@@ -139,32 +144,17 @@ export align_midpoints
 function align_midpoints(events::EventLibrary; center_y=0.5, target_length=256)
   charges = charge_pulses(events; create_new=true)
 
-  s = sample_size(events)
-  half = Int64(target_length/2)
-  rwf = zeros(Float32, target_length, eventcount(events))
+  s = sample_size(events) #1000
+  half = Int64(target_length/2) #128
+  rwf = zeros(Float32, target_length, eventcount(events)) #256, #events
 
   @everythread for i in threadpartition(1:eventcount(events))
-    index = findmin(abs.(charges.waveforms[:,i] - center_y))[2]
-    if (index < half) || (index > s - half)
+    index = findmin(abs.(charges.waveforms[:,i] - center_y))[2] #y is half the max
+    if (index < half) || (index > s - half) #if not enough space to cut, too left or right
       events[:FailedPreprocessing][i] = 1
     else
-      rwf[:,i] = events.waveforms[(index-half+1) : (index+half) , i]
+      rwf[:,i] = events.waveforms[(index-half+1) : (index+half) , i] #actual data cut of target_length size
     end
-  end
-
-  events.waveforms = rwf
-
-  return events
-end
-
-export extract_noise
-function extract_noise(events::EventLibrary; target_length=256)
-  s = sample_size(events)
-  rwf = zeros(Float32, target_length, eventcount(events))
-
-  @everythread for i in threadpartition(1:eventcount(events))
-    rwf[:,i] = events.waveforms[(s-target_length+1):s , i]
-    rwf[:,i] -= mean(rwf[:,i])
   end
 
   events.waveforms = rwf
@@ -192,7 +182,6 @@ function normalize_energy(events::EventLibrary; value=1)
   return events
 end
 
-
 export denoise_waveforms!
 function denoise_waveforms!(events::EventLibrary; designmethod=Butterworth(5), lowpass_cutoff=0.2)
   waveforms = events[:wf]
@@ -202,13 +191,30 @@ function denoise_waveforms!(events::EventLibrary; designmethod=Butterworth(5), l
   end
 end
 
+export extract_noise
+function extract_noise(events::EventLibrary; target_length=200, method="first")
+  s = sample_size(events) #length of a raw trace: 1000
+  rwf = zeros(Float32, target_length, eventcount(events))
+
+  @everythread for i in threadpartition(1:eventcount(events))
+    if method=="first"
+    	rwf[:,i] = events.waveforms[1:target_length, i]
+    else
+    	rwf[:,i] = events.waveforms[(s-target_length+1):s , i] #result trace is target_length long
+    end
+    rwf[:,i] -= mean(rwf[:,i]) # takes the part after the charge rise, cuts it and subtracts mean
+  end
+
+  events.waveforms = rwf
+
+  return events
+end
+
 function denoise_waveforms!(data::DLData; designmethod=Butterworth(5), lowpass_cutoff=0.2)
   for lib in data
     denoise_waveforms!(lib)
   end
 end
-
-
 
 export integrate
 function integrate(events::EventLibrary)
@@ -239,6 +245,7 @@ export differentiate
 function differentiate(events::EventLibrary)
     events = initialize(events)
   @everythread for i in threadpartition(1:eventcount(events))
+#instead of gradient vcat, naive difference calculator, 0 is needed to assign diff value to first element, [:,i] means the waveform of the i-th event (256 entries)
       events.waveforms[:,i] = vcat(0, diff(events.waveforms[:,i]))
   end
   if events[:waveform_type] == "current"
@@ -250,7 +257,7 @@ function differentiate(events::EventLibrary)
 end
 
 
-export scale_waveforms
+export scale_waveforms #scale amplitude
 function scale_waveforms(lib::EventLibrary, val::Number)
   lib = copy(initialize(lib))
   lib.waveforms = lib.waveforms * val
@@ -299,12 +306,15 @@ end
 
 export calculate_deviation
 function calculate_deviation(pulses::EventCollection, reconst::EventCollection, noise::EventCollection)
+    """
+    Calculates the reconstruction error for each event and their baseline noise in the dataset.
+    """
     std_reconst = zeros(Float32, eventcount(noise))
     std_noise = zeros(Float32, eventcount(noise))
 
     wf_pulses = waveforms(pulses)
     wf_reconst = waveforms(reconst)
-    wf_noise = waveforms(noise)
+    wf_noise = waveforms(noise)[1:150,:]
 
     for i in 1:eventcount(pulses)
         std_reconst[i] = std(wf_reconst[:,i]-wf_pulses[:,i])
